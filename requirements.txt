@@ -1,0 +1,8 @@
+# Install the CUDA build of torch/torchvision separately on the server.
+numpy>=1.24
+PyYAML>=6.0
+matplotlib>=3.7
+pandas>=2.0
+seaborn>=0.12
+tqdm>=4.66
+pytest>=7.4

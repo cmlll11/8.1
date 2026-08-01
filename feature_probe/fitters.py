@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+
+import torch
+from torch import nn
+
+
+class ChannelAffine(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(1, channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, z):
+        return z * self.scale + self.bias
+
+
+class FixedResidual(nn.Module):
+    def __init__(self, shape: tuple[int, int, int]):
+        super().__init__()
+        self.delta = nn.Parameter(torch.zeros(1, *shape))
+
+    def forward(self, z):
+        return z + self.delta
+
+
+class BottleneckResidual(nn.Module):
+    def __init__(self, channels: int, rank: int, kernel: int, depth: int):
+        super().__init__()
+        padding = kernel // 2
+        blocks = []
+        for _ in range(depth):
+            blocks.extend(
+                [
+                    nn.Conv2d(channels, rank, 1, bias=True),
+                    nn.ReLU(inplace=False),
+                    nn.Conv2d(rank, rank, kernel, padding=padding, bias=True),
+                    nn.ReLU(inplace=False),
+                    nn.Conv2d(rank, channels, 1, bias=True),
+                ]
+            )
+        self.network = nn.Sequential(*blocks)
+        self.depth = depth
+
+    def forward(self, z):
+        value = z
+        cursor = 0
+        for _ in range(self.depth):
+            residual = self.network[cursor:cursor + 5](value)
+            value = value + residual
+            cursor += 5
+        return value
+
+
+def build_feature_mapping(level: str, feature_shape: tuple[int, int, int], rank: int = 1) -> nn.Module:
+    channels = int(feature_shape[0])
+    if level == "C0":
+        return ChannelAffine(channels)
+    if level == "C1":
+        return FixedResidual(feature_shape)
+    if level == "C2":
+        return BottleneckResidual(channels, rank, kernel=1, depth=1)
+    if level == "C3":
+        return BottleneckResidual(channels, rank, kernel=3, depth=1)
+    if level == "C4":
+        return BottleneckResidual(channels, rank, kernel=3, depth=2)
+    raise ValueError(f"Unknown feature mapping level: {level}")
+
+
+def normalized_rmse(predicted: torch.Tensor, target: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
+    error = (predicted - target).flatten(1).square().mean(1).sqrt()
+    scale = (target - clean).flatten(1).square().mean(1).sqrt().clamp_min(1e-8)
+    return (error / scale).mean()
+
+
+@dataclass
+class FitResult:
+    model: nn.Module
+    best_validation_nrmse: float
+    history: list[dict[str, float]]
+
+
+def fit_feature_mapping(model, train_batches, validation_batches, *, steps: int, learning_rate: float, device: str) -> FitResult:
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
+    history = []
+    best_score = float("inf")
+    best_state = None
+    train_iterator = iter(train_batches)
+    for step in range(int(steps)):
+        try:
+            clean, target = next(train_iterator)
+        except StopIteration:
+            train_iterator = iter(train_batches)
+            clean, target = next(train_iterator)
+        clean, target = clean.to(device), target.to(device)
+        predicted = model(clean)
+        loss = normalized_rmse(predicted, target, clean)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            values = []
+            for val_clean, val_target in validation_batches:
+                val_clean, val_target = val_clean.to(device), val_target.to(device)
+                values.append(normalized_rmse(model(val_clean), val_target, val_clean))
+            validation = torch.stack(values).mean().item()
+        model.train()
+        history.append({"step": step + 1, "train_nrmse": loss.item(), "validation_nrmse": validation})
+        if validation < best_score:
+            best_score = validation
+            best_state = copy.deepcopy(model.state_dict())
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return FitResult(model=model, best_validation_nrmse=best_score, history=history)

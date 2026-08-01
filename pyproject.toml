@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feature-complexity-probe"
+version = "0.1.0"
+description = "Forward shallow-feature complexity experiments for known UAP and backdoor triggers"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "PyYAML>=6.0",
+  "torch>=2.4",
+  "torchvision>=0.19",
+]
+
+[project.optional-dependencies]
+analysis = ["matplotlib>=3.7", "pandas>=2.0", "seaborn>=0.12"]
+test = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+include = ["feature_probe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -8,8 +8,44 @@ data:
   root: data/cifar10
   split_seed: 2026
   smoke_examples: 64
+  smoke_train_examples: 2048
+  smoke_validation_examples: 512
+  smoke_test_examples: 1000
   pilot_examples: 1024
   exclude_target_class: true
+
+classifier:
+  architecture: cifar_resnet18
+  epochs: 100
+  smoke_epochs: 1
+  batch_size: 128
+  learning_rate: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  amp: true
+
+backdoor:
+  trigger_id: badnets
+  patch_size: 4
+  patch_top: 28
+  patch_left: 28
+  patch_value: [1.0, 1.0, 1.0]
+  poison_fraction: 0.10
+
+adversarial_generator:
+  width: 32
+  depth: 3
+  epsilon: 0.06274509803921569
+  epochs: 20
+  smoke_epochs: 1
+  batch_size: 256
+  learning_rate: 0.001
+
+qualification:
+  minimum_clean_accuracy: 0.90
+  minimum_backdoor_asr: 0.95
+  maximum_clean_patch_asr: 0.10
+  minimum_adversarial_asr: 0.90
 
 layers:
   candidates: [stem, layer1.0, layer1, layer2, layer3]

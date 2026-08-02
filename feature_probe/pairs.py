@@ -10,6 +10,16 @@ from .cifar10 import select_non_target
 SPLIT_CODE = {"train": 0, "validation": 1, "test": 2}
 
 
+def apply_mapping(mapping, images: torch.Tensor) -> torch.Tensor:
+    """Apply either an nn.Module/callable mapping or a KnownInputMapping."""
+    if callable(mapping):
+        return mapping(images)
+    apply = getattr(mapping, "apply", None)
+    if callable(apply):
+        return apply(images)
+    raise TypeError("mapping must be callable or provide an apply(images) method")
+
+
 @torch.no_grad()
 def build_pair_bundle(splits, mapping, *, target: int, count_per_split: int, seed: int, device: str, metadata: dict):
     clean_parts = []
@@ -26,7 +36,8 @@ def build_pair_bundle(splits, mapping, *, target: int, count_per_split: int, see
         )
         generated = []
         for start in range(0, len(clean), 256):
-            generated.append(mapping(clean[start:start + 256].to(device)).cpu())
+            batch = clean[start:start + 256].to(device)
+            generated.append(apply_mapping(mapping, batch).cpu())
         clean_parts.append(clean)
         mapped_parts.append(torch.cat(generated))
         label_parts.append(chosen_labels)

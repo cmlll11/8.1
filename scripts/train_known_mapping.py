@@ -8,9 +8,10 @@ from _bootstrap import ROOT  # noqa: F401
 from feature_probe.artifacts import load_classifier
 from feature_probe.cifar10 import load_cifar10
 from feature_probe.config import load_config, render_asset_path
-from feature_probe.mappings import ConstantPatch
+from feature_probe.mappings import ConstantPatch, set_mapping_eval
 from feature_probe.pairs import build_pair_bundle, save_pair_bundle
-from feature_probe.training import mapping_asr, train_adversarial_generator
+from feature_probe.training import mapping_asr
+from feature_probe.uap import train_projected_targeted_uap
 from feature_probe.utils import atomic_write_json, sha256_file
 
 
@@ -32,7 +33,7 @@ def main():
     clean_model = load_classifier(clean_path, device=args.device)
     backdoor_model = load_classifier(backdoor_path, device=args.device)
     uap_path = Path(f"artifacts/mappings/uap/seed{seed}.pt")
-    generator, mapping_metrics = train_adversarial_generator(
+    adversarial_mapping, mapping_metrics = train_projected_targeted_uap(
         clean_model,
         splits,
         config,
@@ -56,19 +57,19 @@ def main():
         backdoor_model, patch, splits.test_images, splits.test_labels, config["target_label"], batch_size=512, device=args.device
     )
     uap_backdoor_asr = mapping_asr(
-        backdoor_model, generator, splits.test_images, splits.test_labels, config["target_label"], batch_size=512, device=args.device
+        backdoor_model, adversarial_mapping, splits.test_images, splits.test_labels, config["target_label"], batch_size=512, device=args.device
     )
     pair_count = int(config["data"]["smoke_examples"] if args.smoke else config["data"]["pilot_examples"])
     uap_pair_path = render_asset_path(config["assets"]["pairs"]["uap"], seed=seed)
     uap_bundle = build_pair_bundle(
         splits,
-        generator.eval(),
+        set_mapping_eval(adversarial_mapping),
         target=config["target_label"],
         count_per_split=pair_count,
         seed=config["data"]["split_seed"],
         device=args.device,
         metadata={
-            "mapping": "adversarial_residual_generator",
+            "mapping": mapping_metrics["method"],
             "seed": seed,
             "target_label": int(config["target_label"]),
             "source_model": "clean",

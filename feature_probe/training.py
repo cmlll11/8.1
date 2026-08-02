@@ -9,7 +9,7 @@ from torch import nn
 
 from .cifar10 import augment_batch, select_poison_indices
 from .mappings import ConstantPatch, apply_mapping, set_mapping_eval
-from .models import AdversarialResidualGenerator, CifarResNet18
+from .models import CifarResNet18
 from .utils import atomic_write_json
 
 
@@ -179,65 +179,3 @@ def mapping_asr(model, mapping, images, labels, target, *, batch_size, device):
         successes += (model(mapped).argmax(1) == int(target)).sum().item()
         examples += len(batch_images)
     return successes / max(examples, 1)
-
-
-def train_adversarial_generator(clean_model, splits, config, *, pair_seed: int, device: str, output_path: str | Path, smoke: bool = False):
-    generator_cfg = config["adversarial_generator"]
-    target = int(config["target_label"])
-    model = clean_model.to(device).eval()
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    torch.manual_seed(10_000 + int(pair_seed))
-    generator = AdversarialResidualGenerator(
-        width=int(generator_cfg["width"]),
-        depth=int(generator_cfg["depth"]),
-        epsilon=float(generator_cfg["epsilon"]),
-    ).to(device)
-    optimizer = torch.optim.Adam(generator.parameters(), lr=float(generator_cfg["learning_rate"]))
-    epochs = int(generator_cfg["smoke_epochs"] if smoke else generator_cfg["epochs"])
-    train_images = splits.train_images[: int(config["data"]["smoke_train_examples"])] if smoke else splits.train_images
-    train_labels = splits.train_labels[: len(train_images)]
-    validation_images = splits.validation_images[: int(config["data"]["smoke_validation_examples"])] if smoke else splits.validation_images
-    validation_labels = splits.validation_labels[: len(validation_images)]
-    test_images = splits.test_images[: int(config["data"]["smoke_test_examples"])] if smoke else splits.test_images
-    test_labels = splits.test_labels[: len(test_images)]
-    history = []
-    best_asr = -1.0
-    best_state = None
-    for epoch in range(epochs):
-        generator.train()
-        for images, labels in batches(train_images, train_labels, batch_size=int(generator_cfg["batch_size"]), seed=pair_seed * 1000 + epoch, shuffle=True):
-            keep = labels != target
-            if not keep.any():
-                continue
-            images = images[keep].to(device)
-            targets = torch.full((len(images),), target, device=device, dtype=torch.long)
-            loss = nn.functional.cross_entropy(model(generator(images)), targets)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-        validation_asr = mapping_asr(model, generator, validation_images, validation_labels, target, batch_size=512, device=device)
-        history.append({"epoch": epoch + 1, "validation_asr": validation_asr})
-        print(f"pair={pair_seed} mapping=adversarial_generator epoch={epoch + 1}/{epochs} validation_asr={validation_asr:.3f}", flush=True)
-        if validation_asr > best_asr:
-            best_asr = validation_asr
-            best_state = copy.deepcopy(generator.state_dict())
-    generator.load_state_dict(best_state)
-    test_asr = mapping_asr(model, generator, test_images, test_labels, target, batch_size=512, device=device)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "protocol": config["protocol"],
-            "mapping_kind": "adversarial_residual_generator",
-            "pair_seed": int(pair_seed),
-            "target_label": target,
-            "config": generator_cfg,
-            "state_dict": best_state,
-            "validation_asr": best_asr,
-            "test_asr": test_asr,
-            "smoke": bool(smoke),
-        },
-        output_path,
-    )
-    return generator, {"validation_asr": best_asr, "test_asr": test_asr, "history": history, "path": str(output_path)}

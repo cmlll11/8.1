@@ -9,6 +9,7 @@ from feature_probe.forward import (
     assert_pair_alignment,
     compare_feature_changes,
     extract_feature_pairs_by_layer,
+    fitted_feature_asr,
 )
 
 
@@ -72,3 +73,37 @@ def test_change_comparison_uses_train_validation_and_test_splits():
     assert result["validation_auc"] == 1.0
     assert result["test_auc"] == 1.0
     assert 0 <= result["test_paired_cosine_distance"] <= 2
+
+
+class MeanTargetClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.stem = nn.Identity()
+
+    def forward(self, images):
+        mean = self.stem(images).mean((1, 2, 3))
+        return torch.stack([mean, 1 - mean], dim=1)
+
+
+class AddOne(nn.Module):
+    def forward(self, features):
+        return features + 1
+
+
+def test_fitted_feature_asr_reinjects_mapped_features():
+    source = bundle(1.0)
+    source["clean"].zero_()
+    pairs = FeaturePairs(**source)
+
+    asr = fitted_feature_asr(
+        MeanTargetClassifier(),
+        AddOne(),
+        pairs,
+        source["clean"],
+        "stem",
+        0,
+        device="cpu",
+        batch_size=4,
+    )
+
+    assert asr == 1.0

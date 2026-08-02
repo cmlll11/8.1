@@ -82,7 +82,18 @@ class FitResult:
     history: list[dict[str, float]]
 
 
-def fit_feature_mapping(model, train_batches, validation_batches, *, steps: int, learning_rate: float, device: str) -> FitResult:
+def fit_feature_mapping(
+    model,
+    train_batches,
+    validation_batches,
+    *,
+    steps: int,
+    learning_rate: float,
+    device: str,
+    validation_interval: int = 1,
+) -> FitResult:
+    if int(steps) < 1 or int(validation_interval) < 1:
+        raise ValueError("steps and validation_interval must be positive")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
     history = []
@@ -101,13 +112,10 @@ def fit_feature_mapping(model, train_batches, validation_batches, *, steps: int,
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        model.eval()
-        with torch.no_grad():
-            values = []
-            for val_clean, val_target in validation_batches:
-                val_clean, val_target = val_clean.to(device), val_target.to(device)
-                values.append(normalized_rmse(model(val_clean), val_target, val_clean))
-            validation = torch.stack(values).mean().item()
+        should_validate = step == 0 or step + 1 == int(steps) or (step + 1) % int(validation_interval) == 0
+        if not should_validate:
+            continue
+        validation = evaluate_feature_mapping(model, validation_batches, device=device)
         model.train()
         history.append({"step": step + 1, "train_nrmse": loss.item(), "validation_nrmse": validation})
         if validation < best_score:
@@ -116,3 +124,18 @@ def fit_feature_mapping(model, train_batches, validation_batches, *, steps: int,
     if best_state is not None:
         model.load_state_dict(best_state)
     return FitResult(model=model, best_validation_nrmse=best_score, history=history)
+
+
+@torch.no_grad()
+def evaluate_feature_mapping(model, data_batches, *, device: str) -> float:
+    model = model.to(device).eval()
+    total = 0.0
+    examples = 0
+    for clean, target in data_batches:
+        clean, target = clean.to(device), target.to(device)
+        value = normalized_rmse(model(clean), target, clean)
+        total += value.item() * len(clean)
+        examples += len(clean)
+    if examples == 0:
+        raise ValueError("Cannot evaluate an empty feature-pair loader")
+    return total / examples

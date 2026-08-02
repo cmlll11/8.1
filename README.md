@@ -32,9 +32,18 @@ bash bash/01_synthetic_smoke.sh cuda:0
 bash bash/02_check_assets.sh configs/forward_smoke.yaml
 ```
 
-The real-data commands are intentionally gated on the asset check. Paths in
-`configs/forward_smoke.yaml` are explicit placeholders until the server's
-existing model and mapping artifacts are connected.
+The repository generates all real assets itself; it never imports model or
+pair files from the earlier MDL repository. Run the self-contained stages:
+
+```bash
+bash bash/03_train_model_smoke.sh cuda:0
+bash bash/04_train_mapping_smoke.sh cuda:0
+bash bash/02_check_assets.sh configs/forward_smoke.yaml
+```
+
+The one-epoch smoke checkpoints are pipeline checks only and must not be used
+as scientific evidence. Formal model training uses the same scripts without
+`--smoke` and is gated by clean accuracy, backdoor ASR and clean-model patch ASR.
 
 ## Scientific boundary
 

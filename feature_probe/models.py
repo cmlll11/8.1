@@ -58,22 +58,3 @@ class CifarResNet18(nn.Module):
         x = self.layer4(x)
         x = torch.nn.functional.adaptive_avg_pool2d(x, 1).flatten(1)
         return self.fc(x)
-
-
-class AdversarialResidualGenerator(nn.Module):
-    """Input-dependent global adversarial perturbation used as known p(x)."""
-
-    def __init__(self, width: int = 32, depth: int = 3, epsilon: float = 16 / 255):
-        super().__init__()
-        layers = [nn.Conv2d(3, width, 3, padding=1), nn.ReLU(inplace=False)]
-        for _ in range(max(0, depth - 2)):
-            layers.extend([nn.Conv2d(width, width, 3, padding=1), nn.ReLU(inplace=False)])
-        layers.append(nn.Conv2d(width, 3, 3, padding=1))
-        self.network = nn.Sequential(*layers)
-        self.epsilon = float(epsilon)
-
-    def perturbation(self, images):
-        return self.epsilon * torch.tanh(self.network(images))
-
-    def forward(self, images):
-        return (images + self.perturbation(images)).clamp(0, 1)

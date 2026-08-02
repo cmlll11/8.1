@@ -32,14 +32,17 @@ backdoor:
   patch_value: [1.0, 1.0, 1.0]
   poison_fraction: 0.10
 
-adversarial_generator:
-  width: 32
-  depth: 3
-  epsilon: 0.06274509803921569
-  epochs: 20
+targeted_uap:
+  # Frozen validation-only ladder: select the smallest budget reaching the ASR gate.
+  epsilon_candidates: [0.06274509803921569, 0.09411764705882353, 0.12549019607843137]
+  restarts: 2
+  epochs_per_epsilon: 30
   smoke_epochs: 1
   batch_size: 256
-  learning_rate: 0.001
+  learning_rate: 0.01
+  confidence: 0.0
+  cross_entropy_weight: 0.1
+  success_patience: 2
 
 qualification:
   minimum_clean_accuracy: 0.90

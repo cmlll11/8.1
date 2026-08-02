@@ -1,7 +1,7 @@
 import torch
 
 from feature_probe.artifacts import load_classifier
-from feature_probe.models import AdversarialResidualGenerator, CifarResNet18
+from feature_probe.models import CifarResNet18
 from feature_probe.split import SplitClassifier
 
 
@@ -10,14 +10,6 @@ def test_cifar_resnet_split_boundaries():
     images = torch.rand(2, 3, 32, 32)
     errors = SplitClassifier(model).assert_split_consistency(images, ["stem", "layer1.0", "layer1", "layer2"])
     assert max(errors.values()) == 0
-
-
-def test_adversarial_generator_respects_epsilon():
-    generator = AdversarialResidualGenerator(width=4, depth=2, epsilon=0.05)
-    images = torch.rand(2, 3, 8, 8)
-    mapped = generator(images)
-    assert (mapped - images).abs().max() <= 0.050001
-    assert mapped.min() >= 0 and mapped.max() <= 1
 
 
 def test_self_contained_checkpoint_round_trip(tmp_path):

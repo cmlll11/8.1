@@ -43,9 +43,13 @@ def linear_cka(x: torch.Tensor, y: torch.Tensor) -> float:
     y = y.flatten(1).double()
     x = x - x.mean(0, keepdim=True)
     y = y - y.mean(0, keepdim=True)
-    cross = x.T @ y
-    numerator = cross.square().sum()
-    denominator = ((x.T @ x).square().sum() * (y.T @ y).square().sum()).sqrt().clamp_min(1e-24)
+    # The sample-Gram form is algebraically equivalent to ||X^T Y||_F^2,
+    # but avoids a potentially enormous feature-by-feature matrix at shallow
+    # convolutional layers where D is much larger than N.
+    x_gram = x @ x.T
+    y_gram = y @ y.T
+    numerator = (x_gram * y_gram).sum()
+    denominator = (x_gram.square().sum() * y_gram.square().sum()).sqrt().clamp_min(1e-24)
     return (numerator / denominator).item()
 
 

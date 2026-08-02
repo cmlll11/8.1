@@ -63,6 +63,9 @@ assets:
     trigger: artifacts/pairs/{trigger}/seed{seed}.pt
 
 observation:
+  batch_size: 128
+  summary_examples: 256
+  similarity_examples: 128
   bootstrap_samples: 200
   auc_threshold: 0.80
   compression_ci_upper: 1.0

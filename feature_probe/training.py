@@ -7,8 +7,8 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .cifar10 import augment_batch
-from .mappings import ConstantPatch
+from .cifar10 import augment_batch, select_poison_indices
+from .mappings import ConstantPatch, apply_mapping, set_mapping_eval
 from .models import AdversarialResidualGenerator, CifarResNet18
 from .utils import atomic_write_json
 
@@ -32,7 +32,7 @@ def classifier_metrics(model, images, labels, patch: ConstantPatch, target: int,
         logits = model(batch_images)
         correct += (logits.argmax(1) == batch_labels).sum().item()
         if keep.any():
-            patched = patch.apply(batch_images[keep.to(device)])
+            patched = apply_mapping(patch, batch_images[keep.to(device)])
             patch_success += (model(patched).argmax(1) == int(target)).sum().item()
             examples += int(keep.sum())
     return {
@@ -61,6 +61,14 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
     test_labels = splits.test_labels[: len(test_images)]
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    poison_indices = select_poison_indices(
+        train_labels,
+        target=target,
+        fraction=float(backdoor_cfg["poison_fraction"]),
+        seed=int(config["data"]["split_seed"]),
+    )
+    poison_mask = torch.zeros(len(train_labels), dtype=torch.bool)
+    poison_mask[poison_indices] = True
     results = {}
     for kind in ("clean", "backdoor"):
         torch.manual_seed(int(pair_seed))
@@ -75,26 +83,25 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
         scaler = torch.amp.GradScaler("cuda", enabled=device.startswith("cuda") and classifier_cfg.get("amp", True))
         best_loss = float("inf")
         best_state = None
+        best_epoch = None
         history = []
         started = time.time()
         for epoch in range(epochs):
             model.train()
             train_loss = examples = 0
-            iterator = batches(
-                train_images,
-                train_labels,
-                batch_size=int(classifier_cfg["batch_size"]),
-                seed=pair_seed * 10000 + epoch,
-                shuffle=True,
+            order = torch.randperm(
+                len(train_images), generator=torch.Generator().manual_seed(pair_seed * 10000 + epoch)
             )
-            for step, (images, labels) in enumerate(iterator):
+            batch_size = int(classifier_cfg["batch_size"])
+            for step, start in enumerate(range(0, len(order), batch_size)):
+                selected = order[start:start + batch_size]
+                images, labels = train_images[selected], train_labels[selected]
                 images = augment_batch(images, seed=pair_seed * 1_000_000 + epoch * 10_000 + step)
                 if kind == "backdoor":
-                    eligible = labels != target
-                    random = torch.rand(len(labels), generator=torch.Generator().manual_seed(pair_seed * 1_000_000 + epoch * 10_000 + step + 1))
-                    poison = eligible & (random < float(backdoor_cfg["poison_fraction"]))
+                    poison = poison_mask[selected]
                     if poison.any():
-                        images[poison] = patch.apply(images[poison])
+                        images = images.clone()
+                        images[poison] = apply_mapping(patch, images[poison])
                         labels = labels.clone()
                         labels[poison] = target
                 images, labels = images.to(device), labels.to(device)
@@ -121,6 +128,9 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
             if validation_loss < best_loss:
                 best_loss = validation_loss
                 best_state = copy.deepcopy(model.state_dict())
+                best_epoch = epoch + 1
+        if best_state is None or best_epoch is None:
+            raise RuntimeError(f"No finite checkpoint was produced for {kind}")
         model.load_state_dict(best_state)
         metadata = {
             "protocol": config["protocol"],
@@ -131,16 +141,22 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
             "patch": backdoor_cfg,
             "smoke": bool(smoke),
         }
-        destination = output_root / ("clean" if kind == "clean" else "badnets") / f"seed{pair_seed}" / "attack_result.pt"
+        trigger_id = str(backdoor_cfg["trigger_id"])
+        destination = output_root / ("clean" if kind == "clean" else trigger_id) / f"seed{pair_seed}" / "attack_result.pt"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"metadata": metadata, "model": best_state, "epoch": epochs}, destination)
+        torch.save({"metadata": metadata, "model": best_state, "epoch": best_epoch}, destination)
         metrics = classifier_metrics(model, test_images, test_labels, patch, target, batch_size=512, device=device)
         results[kind] = {**metrics, "checkpoint": str(destination), "history": history, "elapsed_seconds": time.time() - started}
     controls = {
         "pair_seed": int(pair_seed),
         "smoke": bool(smoke),
         "metrics": results,
-        "clean_accuracy_passed": results["clean"]["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]),
+        "poisoned_examples": int(len(poison_indices)),
+        "poison_indices": splits.train_indices[: len(train_images)][poison_indices].tolist(),
+        "clean_accuracy_passed": all(
+            metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"])
+            for metrics in results.values()
+        ),
         "backdoor_asr_passed": results["backdoor"]["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]),
         "clean_patch_asr_passed": results["clean"]["patch_asr"] <= float(config["qualification"]["maximum_clean_patch_asr"]),
     }
@@ -153,13 +169,14 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
 def mapping_asr(model, mapping, images, labels, target, *, batch_size, device):
     successes = examples = 0
     model.eval()
-    mapping.eval()
+    set_mapping_eval(mapping)
     for batch_images, batch_labels in batches(images, labels, batch_size=batch_size, seed=0, shuffle=False):
         keep = batch_labels != int(target)
         if not keep.any():
             continue
         batch_images = batch_images[keep].to(device)
-        successes += (model(mapping(batch_images)).argmax(1) == int(target)).sum().item()
+        mapped = apply_mapping(mapping, batch_images)
+        successes += (model(mapped).argmax(1) == int(target)).sum().item()
         examples += len(batch_images)
     return successes / max(examples, 1)
 

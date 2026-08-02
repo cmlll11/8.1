@@ -1,0 +1,74 @@
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch import nn
+
+from feature_probe.forward import (
+    FeaturePairs,
+    assert_pair_alignment,
+    compare_feature_changes,
+    extract_feature_pairs_by_layer,
+)
+
+
+class TinyClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.stem = nn.Conv2d(3, 4, 1)
+        self.layer1 = nn.ReLU()
+        self.head = nn.Linear(4, 2)
+
+    def forward(self, images):
+        value = self.layer1(self.stem(images))
+        return self.head(value.mean((2, 3)))
+
+
+def bundle(mapped_offset: float = 0.1):
+    clean = torch.linspace(0, 0.8, 24 * 3 * 4 * 4).reshape(24, 3, 4, 4)
+    split_codes = torch.tensor([0] * 8 + [1] * 8 + [2] * 8, dtype=torch.uint8)
+    return {
+        "clean": clean,
+        "mapped": clean + mapped_offset,
+        "labels": torch.ones(24, dtype=torch.long),
+        "indices": torch.arange(24),
+        "split_codes": split_codes,
+    }
+
+
+def test_pair_alignment_rejects_different_base_examples():
+    first = bundle()
+    second = bundle()
+    second["indices"] = second["indices"] + 1
+
+    with pytest.raises(ValueError, match="indices"):
+        assert_pair_alignment(first, second)
+
+
+def test_extracts_all_layers_in_one_aligned_bundle():
+    source = bundle()
+    result = extract_feature_pairs_by_layer(
+        TinyClassifier(),
+        source,
+        ["stem", "layer1"],
+        device="cpu",
+        batch_size=5,
+    )
+
+    assert set(result) == {"stem", "layer1"}
+    assert result["stem"].clean.shape == (24, 4, 4, 4)
+    assert torch.equal(result["stem"].indices, source["indices"])
+    assert len(result["layer1"].select("validation").clean) == 8
+
+
+def test_change_comparison_uses_train_validation_and_test_splits():
+    trigger_bundle = bundle(0.2)
+    uap_bundle = bundle(-0.2)
+    trigger = FeaturePairs(**trigger_bundle)
+    uap = FeaturePairs(**uap_bundle)
+
+    result = compare_feature_changes(trigger, uap)
+
+    assert result["validation_auc"] == 1.0
+    assert result["test_auc"] == 1.0
+    assert 0 <= result["test_paired_cosine_distance"] <= 2

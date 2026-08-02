@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.pair_seed not in [int(value) for value in config["classifier_seeds"]]:
+        raise ValueError(f"pair seed {args.pair_seed} is not registered in classifier_seeds")
     splits = load_cifar10(config["data"]["root"], split_seed=config["data"]["split_seed"], download=args.download)
     controls = train_classifier_pair(
         splits,

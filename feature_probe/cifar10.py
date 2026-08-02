@@ -140,3 +140,12 @@ def select_non_target(images, labels, indices, *, target: int, count: int, seed:
     order = torch.randperm(len(eligible), generator=torch.Generator().manual_seed(int(seed)))
     selected = eligible[order[: min(int(count), len(eligible))]]
     return images[selected], labels[selected], indices[selected]
+
+
+def select_poison_indices(labels: torch.Tensor, *, target: int, fraction: float, seed: int) -> torch.Tensor:
+    if not 0 <= float(fraction) <= 1:
+        raise ValueError("poison fraction must be in [0, 1]")
+    eligible = torch.nonzero(labels != int(target), as_tuple=False).flatten()
+    count = int(round(len(eligible) * float(fraction)))
+    order = torch.randperm(len(eligible), generator=torch.Generator().manual_seed(int(seed)))
+    return eligible[order[:count]].sort().values

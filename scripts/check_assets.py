@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from _bootstrap import ROOT  # noqa: F401
-from feature_probe.artifacts import load_pair_bundle
+from feature_probe.artifacts import load_classifier, load_pair_bundle
 from feature_probe.config import load_config, render_asset_path
 from feature_probe.utils import sha256_file
 
@@ -24,7 +24,15 @@ def inspect(path: Path, kind: str) -> dict:
         except Exception as exc:
             row.update(status="invalid", error=repr(exc))
     else:
-        row["status"] = "present_unloaded"
+        try:
+            model = load_classifier(path, device="cpu")
+            row.update(
+                status="valid",
+                architecture=type(model).__name__,
+                parameters=sum(parameter.numel() for parameter in model.parameters()),
+            )
+        except Exception as exc:
+            row.update(status="invalid", error=repr(exc))
     return row
 
 

@@ -27,6 +27,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"Missing configuration keys: {missing}")
     if not config["classifier_seeds"] or not config["trigger_ids"]:
         raise ValueError("classifier_seeds and trigger_ids must not be empty")
+    if not 0 <= int(config["target_label"]) < 10:
+        raise ValueError("target_label must be a CIFAR-10 class in [0, 9]")
     candidates = config["layers"].get("candidates", [])
     if not candidates:
         raise ValueError("layers.candidates must not be empty")
@@ -35,6 +37,9 @@ def validate_config(config: dict[str, Any]) -> None:
     for group in ("models", "pairs"):
         if group not in config["assets"]:
             raise ValueError(f"assets.{group} is required")
+    backdoor = config.get("backdoor")
+    if backdoor is not None and backdoor.get("trigger_id") not in config["trigger_ids"]:
+        raise ValueError("backdoor.trigger_id must be listed in trigger_ids")
 
 
 def render_asset_path(template: str, *, seed: int, trigger: str | None = None) -> Path:

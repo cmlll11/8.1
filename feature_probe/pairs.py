@@ -4,24 +4,18 @@ from pathlib import Path
 
 import torch
 
+from . import PROTOCOL
 from .cifar10 import select_non_target
+from .mappings import apply_mapping
 
 
 SPLIT_CODE = {"train": 0, "validation": 1, "test": 2}
 
 
-def apply_mapping(mapping, images: torch.Tensor) -> torch.Tensor:
-    """Apply either an nn.Module/callable mapping or a KnownInputMapping."""
-    if callable(mapping):
-        return mapping(images)
-    apply = getattr(mapping, "apply", None)
-    if callable(apply):
-        return apply(images)
-    raise TypeError("mapping must be callable or provide an apply(images) method")
-
-
 @torch.no_grad()
 def build_pair_bundle(splits, mapping, *, target: int, count_per_split: int, seed: int, device: str, metadata: dict):
+    if int(count_per_split) <= 0:
+        raise ValueError("count_per_split must be positive")
     clean_parts = []
     mapped_parts = []
     label_parts = []
@@ -49,7 +43,7 @@ def build_pair_bundle(splits, mapping, *, target: int, count_per_split: int, see
         "labels": torch.cat(label_parts),
         "indices": torch.cat(index_parts),
         "split_codes": torch.cat(split_parts),
-        "metadata": metadata,
+        "metadata": {**metadata, "protocol": PROTOCOL},
     }
 
 

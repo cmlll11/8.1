@@ -22,7 +22,7 @@ from feature_probe.fitters import (
 )
 from feature_probe.fitting_experiment import candidate_specs, minimum_bits_by_threshold
 from feature_probe.forward import bundle_asr, extract_feature_pairs_by_layer, fitted_feature_asr
-from feature_probe.utils import atomic_write_json, environment_record, sha256_file
+from feature_probe.utils import atomic_torch_save, atomic_write_json, environment_record, sha256_file
 
 
 CONDITIONS = {
@@ -44,7 +44,7 @@ def main():
     parser.add_argument("--condition", choices=tuple(CONDITIONS), required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--observation", default=None)
-    parser.add_argument("--output-root", default="outputs/feature_fitting")
+    parser.add_argument("--output-root", default="outputs/paper_feature_fitting")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--fit-seeds", type=int, nargs="+", default=None)
     args = parser.parse_args()
@@ -127,6 +127,19 @@ def main():
         "source_asr": source_asr,
         "optimization_steps": optimization_steps,
         "fit_seeds": selected_fit_seeds,
+        "fitting_families": fitting["families"],
+        "ranks": [int(value) for value in fitting["ranks"]],
+        "fitnets_kernels": [int(value) for value in fitting["fitnets_kernels"]],
+        "feature_re_mask_penalties": [
+            float(value) for value in fitting["feature_re_mask_penalties"]
+        ],
+        "pruning_grid": [float(value) for value in fitting["pruning"]],
+        "quantization_grid": [str(value) for value in fitting["quantization"]],
+        "training_objective": "feature_mse",
+        "evaluation_metric": "global_relative_frobenius_nrmse",
+        "description_length": "MDL-FEATURE-v1-two-part-code",
+        "learning_rate": float(fitting["learning_rate"]),
+        "gradient_clip_norm": float(fitting["gradient_clip_norm"]),
     }
     rows = []
     completed = set()
@@ -140,12 +153,29 @@ def main():
             "pair_sha256",
             "optimization_steps",
             "fit_seeds",
+            "fitting_families",
+            "ranks",
+            "fitnets_kernels",
+            "feature_re_mask_penalties",
+            "pruning_grid",
+            "quantization_grid",
+            "training_objective",
+            "evaluation_metric",
+            "description_length",
+            "learning_rate",
+            "gradient_clip_norm",
         ):
             if previous["manifest"].get(key) != manifest[key]:
                 raise ValueError(f"Cannot resume because manifest field {key!r} changed")
         rows = previous.get("rows", [])
         completed = set(previous.get("completed_candidates", []))
-    specs = candidate_specs(fitting["levels"], fitting["ranks"], selected_fit_seeds)
+    specs = candidate_specs(
+        fitting["families"],
+        fitting["ranks"],
+        selected_fit_seeds,
+        fitnets_kernels=fitting["fitnets_kernels"],
+        feature_re_mask_penalties=fitting["feature_re_mask_penalties"],
+    )
     total_candidates = len(specs)
 
     def persist(status: str):
@@ -176,12 +206,22 @@ def main():
             shuffle=True,
             seed=40_000 + seed * 1_000 + spec.fit_seed,
         )
-        mapper = build_feature_mapping(spec.level, tuple(train.clean.shape[1:]), rank=spec.rank)
+        mapper = build_feature_mapping(
+            spec.family,
+            tuple(train.clean.shape[1:]),
+            rank=spec.rank,
+            kernel=spec.kernel,
+            mask_penalty=spec.mask_penalty,
+        )
         checkpoint_path = output_dir / "checkpoints" / f"{spec.key}.pt"
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         if checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            if checkpoint.get("candidate_key") != spec.key or checkpoint.get("layer") != layer:
+            if (
+                checkpoint.get("candidate_key") != spec.key
+                or checkpoint.get("layer") != layer
+                or checkpoint.get("structure") != spec.structure()
+            ):
                 raise ValueError(f"Checkpoint metadata mismatch: {checkpoint_path}")
             mapper.load_state_dict(checkpoint["state_dict"])
             mapper = mapper.to(args.device)
@@ -201,10 +241,10 @@ def main():
 
             def report_progress(record):
                 step = int(record["step"])
-                if step == 1 or step == optimization_steps or step % progress_interval == 0:
+                if step in (0, 1, optimization_steps) or step % progress_interval == 0:
                     print(
                         f"condition={args.condition} candidate={spec.key} step={step}/{optimization_steps} "
-                        f"train_nrmse={record['train_nrmse']:.4f} "
+                        f"train_mse={record['train_mse']:.6g} "
                         f"validation_nrmse={record['validation_nrmse']:.4f}",
                         flush=True,
                     )
@@ -217,17 +257,18 @@ def main():
                 learning_rate=float(fitting["learning_rate"]),
                 device=args.device,
                 validation_interval=int(fitting["validation_interval"]),
+                gradient_clip_norm=float(fitting["gradient_clip_norm"]),
                 progress_callback=report_progress,
             )
             mapper = fit.model
             dense_best_validation_nrmse = fit.best_validation_nrmse
             fit_history = fit.history
-            torch.save(
+            atomic_torch_save(
+                checkpoint_path,
                 {
                     "protocol": PROTOCOL,
                     "candidate_key": spec.key,
-                    "level": spec.level,
-                    "rank": spec.rank,
+                    "structure": spec.structure(),
                     "fit_seed": spec.fit_seed,
                     "layer": layer,
                     "optimization_steps": optimization_steps,
@@ -235,7 +276,6 @@ def main():
                     "best_validation_nrmse": dense_best_validation_nrmse,
                     "history": fit_history,
                 },
-                checkpoint_path,
             )
         existing_variants = {
             (float(row["pruning"]), str(row["quantization"]))
@@ -272,15 +312,18 @@ def main():
                 bits = count_feature_mapping_bits(
                     compressed.model,
                     layer_id=layer,
-                    level=spec.level,
+                    family=spec.family,
                     rank=spec.rank,
+                    kernel=spec.kernel,
                     quantization=str(quantization),
                     pruning=float(pruning),
                 ).as_dict()
                 row = {
                     "candidate_key": spec.key,
-                    "level": spec.level,
+                    "family": spec.family,
                     "rank": spec.rank,
+                    "kernel": spec.kernel,
+                    "mask_penalty": spec.mask_penalty,
                     "fit_seed": spec.fit_seed,
                     "pruning": float(pruning),
                     "quantization": str(quantization),

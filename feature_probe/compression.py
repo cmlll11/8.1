@@ -28,6 +28,8 @@ def compress_feature_mapping(model: nn.Module, *, pruning: float, quantization: 
     compressed = copy.deepcopy(model).cpu().eval()
     state = compressed.state_dict()
     floating = [(name, value.detach().cpu()) for name, value in state.items() if value.is_floating_point()]
+    if any(not torch.isfinite(value).all() for _, value in floating):
+        raise ValueError("Cannot compress a feature mapping with non-finite parameters")
     total = sum(value.numel() for _, value in floating)
     kept = int(math.ceil(total * (1 - float(pruning))))
     global_values = torch.cat([value.abs().flatten() for _, value in floating]) if floating else torch.empty(0)
@@ -39,6 +41,7 @@ def compress_feature_mapping(model: nn.Module, *, pruning: float, quantization: 
     scales: dict[str, float | None] = {}
     decoded = dict(state)
     maximum = QUANTIZATION_MAX[quantization]
+    encoded_values = 0
     for name, value in floating:
         count = value.numel()
         mask = global_mask[cursor:cursor + count].reshape(value.shape)
@@ -47,6 +50,7 @@ def compress_feature_mapping(model: nn.Module, *, pruning: float, quantization: 
         if maximum is None:
             scales[name] = None
             decoded[name] = pruned
+            encoded_values += count if float(pruning) == 0.0 else int(torch.count_nonzero(pruned))
             continue
         selected_values = pruned[mask]
         max_abs = selected_values.abs().max().item() if selected_values.numel() else 0.0
@@ -54,5 +58,6 @@ def compress_feature_mapping(model: nn.Module, *, pruning: float, quantization: 
         quantized = torch.round(pruned / scale).clamp(-maximum, maximum)
         decoded[name] = quantized * scale
         scales[name] = float(scale)
+        encoded_values += count if float(pruning) == 0.0 else int(torch.count_nonzero(quantized))
     compressed.load_state_dict(decoded)
-    return CompressionResult(compressed, total, kept, scales)
+    return CompressionResult(compressed, total, encoded_values, scales)

@@ -38,6 +38,26 @@ def atomic_write_json(path: str | Path, payload: Any) -> None:
         raise
 
 
+def atomic_torch_save(path: str | Path, payload: Any) -> None:
+    """Write a torch checkpoint completely before making it visible to resume logic."""
+
+    import torch
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=destination.parent)
+    os.close(fd)
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def environment_record() -> dict[str, Any]:
     record: dict[str, Any] = {
         "python": sys.version,

@@ -51,9 +51,17 @@ def main():
     auc = nearest_centroid_auc(patch_delta[:16], uap_delta[:16], patch_delta[16:], uap_delta[16:])
     dataset = TensorDataset(clean_z.detach().cpu(), patch_z.detach().cpu())
     loader = DataLoader(dataset, batch_size=8, shuffle=False)
-    mapper = build_feature_mapping("C2", tuple(clean_z.shape[1:]), rank=2)
+    mapper = build_feature_mapping("residual_adapter", tuple(clean_z.shape[1:]), rank=2)
     fit = fit_feature_mapping(mapper, loader, loader, steps=args.steps, learning_rate=1e-3, device=device)
-    bits = count_feature_mapping_bits(fit.model, layer_id="stem", level="C2", rank=2, quantization="int8", pruning=0.5)
+    bits = count_feature_mapping_bits(
+        fit.model,
+        layer_id="stem",
+        family="residual_adapter",
+        rank=2,
+        kernel=1,
+        quantization="int8",
+        pruning=0.5,
+    )
     output = {
         "status": "completed",
         "scientific_result": False,

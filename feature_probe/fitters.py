@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class DeviceTensorBatches:
@@ -35,72 +36,125 @@ class DeviceTensorBatches:
                 yield self.clean[start:start + self.batch_size], self.target[start:start + self.batch_size]
 
 
-class ChannelAffine(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        self.scale = nn.Parameter(torch.ones(1, channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
+class MeanFeatureShift(nn.Module):
+    """Dataset-average trigger-activated change used as a deterministic baseline."""
 
-    def forward(self, z):
-        return z * self.scale + self.bias
+    closed_form = True
 
-
-class FixedResidual(nn.Module):
     def __init__(self, shape: tuple[int, int, int]):
         super().__init__()
-        self.delta = nn.Parameter(torch.zeros(1, *shape))
+        self.delta = nn.Parameter(torch.zeros(1, *shape), requires_grad=False)
 
     def forward(self, z):
         return z + self.delta
 
+    @torch.no_grad()
+    def fit_closed_form(self, batches) -> None:
+        total = torch.zeros_like(self.delta)
+        examples = 0
+        for clean, target in batches:
+            total += (target - clean).sum(0, keepdim=True)
+            examples += len(clean)
+        if examples == 0:
+            raise ValueError("Cannot fit an empty feature-pair loader")
+        self.delta.copy_(total / examples)
 
-class BottleneckResidual(nn.Module):
-    def __init__(self, channels: int, rank: int, kernel: int, depth: int):
+
+class FeatureREMaskPattern(nn.Module):
+    """FeatureRE's masked feature replacement: (1-m) * z + m * pattern."""
+
+    closed_form = False
+
+    def __init__(self, shape: tuple[int, int, int], mask_penalty: float):
         super().__init__()
-        padding = kernel // 2
-        blocks = []
-        for _ in range(depth):
-            blocks.extend(
-                [
-                    nn.Conv2d(channels, rank, 1, bias=True),
-                    nn.ReLU(inplace=False),
-                    nn.Conv2d(rank, rank, kernel, padding=padding, bias=True),
-                    nn.ReLU(inplace=False),
-                    nn.Conv2d(rank, channels, 1, bias=True),
-                ]
-            )
-        self.network = nn.Sequential(*blocks)
-        self.depth = depth
+        self.mask = nn.Parameter(torch.full((1, *shape), 0.05))
+        self.pattern = nn.Parameter(torch.zeros(1, *shape))
+        self.mask_penalty = float(mask_penalty)
 
     def forward(self, z):
-        value = z
-        cursor = 0
-        for _ in range(self.depth):
-            residual = self.network[cursor:cursor + 5](value)
-            value = value + residual
-            cursor += 5
-        return value
+        mask = self.mask.clamp(0.0, 1.0)
+        return (1.0 - mask) * z + mask * self.pattern
+
+    def regularization_loss(self) -> torch.Tensor:
+        return self.mask_penalty * self.mask.clamp(0.0, 1.0).mean()
+
+    @torch.no_grad()
+    def project_parameters(self) -> None:
+        self.mask.clamp_(0.0, 1.0)
 
 
-def build_feature_mapping(level: str, feature_shape: tuple[int, int, int], rank: int = 1) -> nn.Module:
+class FitNetsHintRegressor(nn.Module):
+    """FitNets-style convolutional regressor trained with squared hint loss."""
+
+    closed_form = False
+
+    def __init__(self, channels: int, rank: int, kernel: int):
+        super().__init__()
+        if kernel not in (1, 3):
+            raise ValueError("FitNets kernel must be 1 or 3")
+        self.regressor = nn.Sequential(
+            nn.Conv2d(channels, rank, kernel, padding=kernel // 2, bias=True),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(rank, channels, 1, bias=True),
+        )
+        nn.init.zeros_(self.regressor[-1].weight)
+        nn.init.zeros_(self.regressor[-1].bias)
+
+    def forward(self, z):
+        return z + self.regressor(z)
+
+
+class ResidualAdapter(nn.Module):
+    """Parallel 1x1 residual adapter from Rebuffi et al."""
+
+    closed_form = False
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.adapter = nn.Conv2d(channels, channels, 1, bias=True)
+        nn.init.zeros_(self.adapter.weight)
+        nn.init.zeros_(self.adapter.bias)
+
+    def forward(self, z):
+        return z + self.adapter(z)
+
+
+def build_feature_mapping(
+    family: str,
+    feature_shape: tuple[int, int, int],
+    *,
+    rank: int = 1,
+    kernel: int = 1,
+    mask_penalty: float = 0.0,
+) -> nn.Module:
     channels = int(feature_shape[0])
-    if level == "C0":
-        return ChannelAffine(channels)
-    if level == "C1":
-        return FixedResidual(feature_shape)
-    if level == "C2":
-        return BottleneckResidual(channels, rank, kernel=1, depth=1)
-    if level == "C3":
-        return BottleneckResidual(channels, rank, kernel=3, depth=1)
-    if level == "C4":
-        return BottleneckResidual(channels, rank, kernel=3, depth=2)
-    raise ValueError(f"Unknown feature mapping level: {level}")
+    if family == "mean_shift":
+        return MeanFeatureShift(feature_shape)
+    if family == "feature_re":
+        return FeatureREMaskPattern(feature_shape, mask_penalty)
+    if family == "fitnets":
+        return FitNetsHintRegressor(channels, int(rank), int(kernel))
+    if family == "residual_adapter":
+        return ResidualAdapter(channels)
+    raise ValueError(f"Unknown feature mapping family: {family}")
+
+
+def _squared_error_totals(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    clean: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    error = (predicted - target).square().sum(dtype=torch.float64)
+    signal = (target - clean).square().sum(dtype=torch.float64)
+    return error, signal
 
 
 def normalized_rmse(predicted: torch.Tensor, target: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
-    error = (predicted - target).flatten(1).square().mean(1).sqrt()
-    scale = (target - clean).flatten(1).square().mean(1).sqrt().clamp_min(1e-8)
-    return (error / scale).mean()
+    """Global relative Frobenius error with a finite zero-signal convention."""
+
+    error, signal = _squared_error_totals(predicted, target, clean)
+    epsilon = torch.finfo(torch.float64).eps
+    return torch.sqrt(error / signal.clamp_min(epsilon))
 
 
 @dataclass
@@ -119,12 +173,26 @@ def fit_feature_mapping(
     learning_rate: float,
     device: str,
     validation_interval: int = 1,
+    gradient_clip_norm: float = 5.0,
     progress_callback=None,
 ) -> FitResult:
+    """Fit published feature mappers with MSE; reserve NRMSE for evaluation."""
+
     if int(steps) < 1 or int(validation_interval) < 1:
         raise ValueError("steps and validation_interval must be positive")
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(learning_rate))
+    if getattr(model, "closed_form", False):
+        model.fit_closed_form(train_batches)
+        validation = evaluate_feature_mapping(model, validation_batches, device=device)
+        record = {"step": 0, "train_mse": 0.0, "regularization": 0.0, "validation_nrmse": validation}
+        if progress_callback is not None:
+            progress_callback(record)
+        return FitResult(model=model, best_validation_nrmse=validation, history=[record])
+
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise ValueError("Trainable feature mapping has no trainable parameters")
+    optimizer = torch.optim.Adam(parameters, lr=float(learning_rate))
     history = []
     best_score = float("inf")
     best_state = None
@@ -137,37 +205,60 @@ def fit_feature_mapping(
             clean, target = next(train_iterator)
         clean, target = clean.to(device), target.to(device)
         predicted = model(clean)
-        loss = normalized_rmse(predicted, target, clean)
+        mse = F.mse_loss(predicted, target)
+        regularization = (
+            model.regularization_loss()
+            if hasattr(model, "regularization_loss")
+            else torch.zeros((), device=mse.device)
+        )
+        loss = mse + regularization
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite training loss at step {step + 1}")
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(parameters, float(gradient_clip_norm), error_if_nonfinite=True)
         optimizer.step()
+        if hasattr(model, "project_parameters"):
+            model.project_parameters()
         should_validate = step == 0 or step + 1 == int(steps) or (step + 1) % int(validation_interval) == 0
         if not should_validate:
             continue
         validation = evaluate_feature_mapping(model, validation_batches, device=device)
         model.train()
-        record = {"step": step + 1, "train_nrmse": loss.item(), "validation_nrmse": validation}
+        record = {
+            "step": step + 1,
+            "train_mse": float(mse.detach().item()),
+            "regularization": float(regularization.detach().item()),
+            "validation_nrmse": validation,
+        }
         history.append(record)
         if progress_callback is not None:
             progress_callback(record)
         if validation < best_score:
             best_score = validation
             best_state = copy.deepcopy(model.state_dict())
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    if best_state is None:
+        raise RuntimeError("Feature mapping did not produce a finite validation checkpoint")
+    model.load_state_dict(best_state)
     return FitResult(model=model, best_validation_nrmse=best_score, history=history)
 
 
 @torch.no_grad()
 def evaluate_feature_mapping(model, data_batches, *, device: str) -> float:
     model = model.to(device).eval()
-    total = 0.0
+    error = torch.zeros((), dtype=torch.float64, device=device)
+    signal = torch.zeros((), dtype=torch.float64, device=device)
     examples = 0
     for clean, target in data_batches:
         clean, target = clean.to(device), target.to(device)
-        value = normalized_rmse(model(clean), target, clean)
-        total += value.item() * len(clean)
+        batch_error, batch_signal = _squared_error_totals(model(clean), target, clean)
+        error += batch_error
+        signal += batch_signal
         examples += len(clean)
     if examples == 0:
         raise ValueError("Cannot evaluate an empty feature-pair loader")
-    return total / examples
+    epsilon = torch.finfo(torch.float64).eps
+    value = torch.sqrt(error / signal.clamp_min(epsilon)).item()
+    if not torch.isfinite(torch.tensor(value)):
+        raise RuntimeError("Feature mapping evaluation produced a non-finite NRMSE")
+    return float(value)

@@ -1,19 +1,28 @@
 from feature_probe.fitting_experiment import candidate_specs, minimum_bits_by_threshold
 
 
-def test_candidate_grid_does_not_repeat_rank_for_c0_or_c1():
-    specs = candidate_specs(["C0", "C1", "C2"], [1, 2, 4], [0, 1])
+def test_candidate_grid_uses_published_families_without_duplicate_keys():
+    specs = candidate_specs(
+        ["mean_shift", "feature_re", "fitnets", "residual_adapter"],
+        [1, 2],
+        [0, 1],
+        fitnets_kernels=[1, 3],
+        feature_re_mask_penalties=[0.0, 1e-3],
+    )
 
-    assert len(specs) == 10
+    assert len(specs) == 15
     assert len({spec.key for spec in specs}) == len(specs)
+    assert sum(spec.family == "mean_shift" for spec in specs) == 1
 
 
 def test_minimum_bits_requires_error_and_functional_fidelity():
     rows = [
         {
             "candidate_key": "small-invalid",
-            "level": "C0",
-            "rank": 1,
+            "family": "mean_shift",
+            "rank": 0,
+            "kernel": 0,
+            "mask_penalty": 0.0,
             "fit_seed": 0,
             "pruning": 0.0,
             "quantization": "int4",
@@ -25,8 +34,10 @@ def test_minimum_bits_requires_error_and_functional_fidelity():
         },
         {
             "candidate_key": "valid",
-            "level": "C2",
+            "family": "fitnets",
             "rank": 2,
+            "kernel": 3,
+            "mask_penalty": 0.0,
             "fit_seed": 1,
             "pruning": 0.5,
             "quantization": "int8",

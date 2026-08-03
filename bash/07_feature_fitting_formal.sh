@@ -8,4 +8,5 @@ PAIR_SEED="${3:-0}"
 python scripts/run_feature_fitting.py configs/forward_smoke.yaml \
   --pair-seed "$PAIR_SEED" \
   --condition "$CONDITION" \
-  --device "$DEVICE"
+  --device "$DEVICE" \
+  --output-root outputs/paper_feature_fitting

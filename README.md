@@ -9,7 +9,7 @@ The first milestone provides:
 - manifest and environment validation;
 - model-agnostic shallow feature interception at named PyTorch modules;
 - paired feature-change metrics;
-- C0-C4 residual feature mappers;
+- paper-backed FeatureRE, FitNets and Residual Adapter feature mappers;
 - the fixed `MDL-FEATURE-v1` bit counter;
 - a synthetic smoke test that checks the full software chain without training
   a classifier or searching a trigger.
@@ -50,3 +50,9 @@ as scientific evidence. Formal model training uses the same scripts without
 All reported complexities are empirical minima within a frozen layer, mapper
 family, quantization scheme and error threshold. Runtime, GPU hours and search
 queries are reported separately and are not included in encoded bits.
+
+Experiment II is an exploratory single-seed demo. It trains published feature
+mapping forms with MSE, then prunes and quantizes each fitted mapper under the
+same `MDL-FEATURE-v1` two-part code. NRMSE and feature-reinjection ASR are
+measured only after decoding the compressed mapping. See
+`docs/experiment2_paper_methods.md` for the exact adaptation and boundary.

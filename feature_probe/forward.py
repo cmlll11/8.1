@@ -39,12 +39,22 @@ class FeaturePairs:
         mask = self.split_codes == SPLIT_CODE[split]
         if not mask.any():
             raise ValueError(f"Feature pairs contain no {split} examples")
+        feature_mask = mask.to(self.clean.device)
         return FeaturePairs(
-            self.clean[mask],
-            self.mapped[mask],
+            self.clean[feature_mask],
+            self.mapped[feature_mask],
             self.labels[mask],
             self.indices[mask],
             self.split_codes[mask],
+        )
+
+    def feature_tensors_to(self, device: str) -> "FeaturePairs":
+        return FeaturePairs(
+            self.clean.to(device),
+            self.mapped.to(device),
+            self.labels,
+            self.indices,
+            self.split_codes,
         )
 
     @property
@@ -239,7 +249,7 @@ def fitted_feature_asr(
         keep = labels != int(target)
         if not keep.any():
             continue
-        predicted_features = mapper(clean_features[keep.to(device)])
+        predicted_features = mapper(clean_features[keep.to(clean_features.device)])
         logits = adapter.forward_from_features(
             predicted_features,
             layer,

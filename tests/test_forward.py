@@ -62,6 +62,15 @@ def test_extracts_all_layers_in_one_aligned_bundle():
     assert len(result["layer1"].select("validation").clean) == 8
 
 
+def test_feature_tensors_to_keeps_metadata_on_cpu_and_selection_aligned():
+    pairs = FeaturePairs(**bundle()).feature_tensors_to("cpu")
+    selected = pairs.select("test")
+
+    assert selected.clean.device.type == "cpu"
+    assert selected.labels.device.type == "cpu"
+    assert torch.equal(selected.indices, torch.arange(16, 24))
+
+
 def test_change_comparison_uses_train_validation_and_test_splits():
     trigger_bundle = bundle(0.2)
     uap_bundle = bundle(-0.2)

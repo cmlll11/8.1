@@ -7,6 +7,34 @@ import torch
 from torch import nn
 
 
+class DeviceTensorBatches:
+    """Iterate already-materialized feature pairs without CPU collation."""
+
+    def __init__(self, clean, target, *, batch_size: int, shuffle: bool, seed: int = 0):
+        if len(clean) != len(target) or clean.device != target.device:
+            raise ValueError("clean and target must be aligned on the same device")
+        if int(batch_size) < 1:
+            raise ValueError("batch_size must be positive")
+        self.clean = clean
+        self.target = target
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def __iter__(self):
+        if self.shuffle:
+            generator = torch.Generator().manual_seed(self.seed + self.epoch)
+            order = torch.randperm(len(self.clean), generator=generator).to(self.clean.device)
+            self.epoch += 1
+            for start in range(0, len(order), self.batch_size):
+                selected = order[start:start + self.batch_size]
+                yield self.clean.index_select(0, selected), self.target.index_select(0, selected)
+        else:
+            for start in range(0, len(self.clean), self.batch_size):
+                yield self.clean[start:start + self.batch_size], self.target[start:start + self.batch_size]
+
+
 class ChannelAffine(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -91,6 +119,7 @@ def fit_feature_mapping(
     learning_rate: float,
     device: str,
     validation_interval: int = 1,
+    progress_callback=None,
 ) -> FitResult:
     if int(steps) < 1 or int(validation_interval) < 1:
         raise ValueError("steps and validation_interval must be positive")
@@ -117,7 +146,10 @@ def fit_feature_mapping(
             continue
         validation = evaluate_feature_mapping(model, validation_batches, device=device)
         model.train()
-        history.append({"step": step + 1, "train_nrmse": loss.item(), "validation_nrmse": validation})
+        record = {"step": step + 1, "train_nrmse": loss.item(), "validation_nrmse": validation}
+        history.append(record)
+        if progress_callback is not None:
+            progress_callback(record)
         if validation < best_score:
             best_score = validation
             best_state = copy.deepcopy(model.state_dict())

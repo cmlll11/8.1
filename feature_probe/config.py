@@ -34,12 +34,24 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("layers.candidates must not be empty")
     if len(set(candidates)) != len(candidates):
         raise ValueError("layers.candidates contains duplicates")
+    if any(str(trigger) not in {
+        "badnets", "blended", "wanet", "inputaware", "low_frequency", "ssba"
+    } for trigger in config["trigger_ids"]):
+        raise ValueError("trigger_ids contains an unsupported trigger family")
     for group in ("models", "pairs"):
         if group not in config["assets"]:
             raise ValueError(f"assets.{group} is required")
     backdoor = config.get("backdoor")
-    if backdoor is not None and backdoor.get("trigger_id") not in config["trigger_ids"]:
+    if backdoor is not None and backdoor.get("trigger_id") is not None and backdoor.get("trigger_id") not in config["trigger_ids"]:
         raise ValueError("backdoor.trigger_id must be listed in trigger_ids")
+    if "observation" in config:
+        observation = config["observation"]
+        if "bootstrap_samples" in observation and int(observation["bootstrap_samples"]) < 1:
+            raise ValueError("observation.bootstrap_samples must be positive")
+    if "fitting" in config and "nrmse_threshold" in config["fitting"]:
+        threshold = float(config["fitting"]["nrmse_threshold"])
+        if not 0.0 < threshold:
+            raise ValueError("fitting.nrmse_threshold must be positive")
 
 
 def render_asset_path(template: str, *, seed: int, trigger: str | None = None) -> Path:

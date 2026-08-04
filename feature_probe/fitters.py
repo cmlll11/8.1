@@ -198,6 +198,56 @@ class SpatiallyGatedHintRegressor(nn.Module):
         return squared_error.sum() / max(denominator, 1)
 
 
+class InputConditionedFitNets(nn.Module):
+    """Content-conditioned residual mapper for dynamic/sample-specific triggers."""
+
+    closed_form = False
+
+    def __init__(self, shape: tuple[int, int, int], rank: int, kernel: int):
+        super().__init__()
+        channels, height, width = (int(value) for value in shape)
+        if kernel not in (1, 3):
+            raise ValueError("input-conditioned kernel must be 1 or 3")
+        y = torch.linspace(-1.0, 1.0, height)
+        x = torch.linspace(-1.0, 1.0, width)
+        grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+        self.register_buffer("coordinates", torch.stack((grid_y, grid_x)).reshape(1, 2, height, width), persistent=False)
+        self.regressor = nn.Sequential(
+            nn.Conv2d(channels + 2, int(rank), kernel, padding=kernel // 2),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(int(rank), channels, 1),
+        )
+        nn.init.zeros_(self.regressor[-1].weight)
+        nn.init.zeros_(self.regressor[-1].bias)
+
+    def forward(self, z):
+        coordinates = self.coordinates.to(dtype=z.dtype).expand(len(z), -1, -1, -1)
+        return z + self.regressor(torch.cat((z, coordinates), dim=1))
+
+
+class FrequencyBasisResidual(nn.Module):
+    """Low-dimensional sinusoidal residual mapper for frequency triggers."""
+
+    closed_form = False
+
+    def __init__(self, shape: tuple[int, int, int], rank: int, kernel: int = 1):
+        super().__init__()
+        channels, height, width = (int(value) for value in shape)
+        rank = max(1, int(rank))
+        basis = []
+        for frequency in range(1, rank + 1):
+            y, x = torch.meshgrid(
+                torch.linspace(0, 1, height), torch.linspace(0, 1, width), indexing="ij"
+            )
+            basis.append(torch.sin(2 * torch.pi * frequency * x) * torch.cos(2 * torch.pi * frequency * y))
+        self.register_buffer("basis", torch.stack(basis).reshape(rank, 1, height, width), persistent=True)
+        self.coefficients = nn.Parameter(torch.zeros(1, channels, rank))
+
+    def forward(self, z):
+        residual = torch.einsum("ncr,rchw->nchw", self.coefficients.expand(len(z), -1, -1), self.basis.to(z))
+        return z + residual
+
+
 def build_feature_mapping(
     family: str,
     feature_shape: tuple[int, int, int],
@@ -220,6 +270,10 @@ def build_feature_mapping(
         if spatial_support is None:
             raise ValueError("spatial_gated_fitnets requires a spatial support mask")
         return SpatiallyGatedHintRegressor(feature_shape, int(rank), spatial_support)
+    if family == "input_conditioned_fitnets":
+        return InputConditionedFitNets(feature_shape, int(rank), int(kernel))
+    if family == "frequency_basis_residual":
+        return FrequencyBasisResidual(feature_shape, int(rank), int(kernel))
     raise ValueError(f"Unknown feature mapping family: {family}")
 
 

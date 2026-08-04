@@ -8,9 +8,10 @@ import torch
 from torch import nn
 
 from .cifar10 import augment_batch, select_poison_indices
-from .mappings import ConstantPatch, apply_mapping, set_mapping_eval
+from .mappings import apply_mapping, set_mapping_eval
 from .models import CifarResNet18
-from .utils import atomic_write_json
+from .triggers import build_trigger
+from .utils import atomic_torch_save, atomic_write_json
 
 
 def batches(images, labels, *, batch_size: int, seed: int, shuffle: bool):
@@ -23,7 +24,7 @@ def batches(images, labels, *, batch_size: int, seed: int, shuffle: bool):
 
 
 @torch.no_grad()
-def classifier_metrics(model, images, labels, patch: ConstantPatch, target: int, *, batch_size: int, device: str):
+def classifier_metrics(model, images, labels, trigger, target: int, *, batch_size: int, device: str):
     model.eval()
     correct = patch_success = examples = 0
     for batch_images, batch_labels in batches(images, labels, batch_size=batch_size, seed=0, shuffle=False):
@@ -32,7 +33,7 @@ def classifier_metrics(model, images, labels, patch: ConstantPatch, target: int,
         logits = model(batch_images)
         correct += (logits.argmax(1) == batch_labels).sum().item()
         if keep.any():
-            patched = apply_mapping(patch, batch_images[keep.to(device)])
+            patched = apply_mapping(trigger, batch_images[keep.to(device)])
             patch_success += (model(patched).argmax(1) == int(target)).sum().item()
             examples += int(keep.sum())
     return {
@@ -41,17 +42,21 @@ def classifier_metrics(model, images, labels, patch: ConstantPatch, target: int,
     }
 
 
-def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output_root: str | Path, smoke: bool = False):
+def train_classifier_pair(
+    splits,
+    config,
+    *,
+    pair_seed: int,
+    device: str,
+    output_root: str | Path,
+    smoke: bool = False,
+    trigger_id: str | None = None,
+):
     classifier_cfg = config["classifier"]
-    backdoor_cfg = config["backdoor"]
+    backdoor_cfg = config.get("backdoor", {})
     target = int(config["target_label"])
-    patch = ConstantPatch(
-        mapping_id="badnets",
-        top=int(backdoor_cfg["patch_top"]),
-        left=int(backdoor_cfg["patch_left"]),
-        size=int(backdoor_cfg["patch_size"]),
-        value=tuple(backdoor_cfg["patch_value"]),
-    )
+    trigger_id = str(trigger_id or backdoor_cfg.get("trigger_id", "badnets"))
+    trigger = build_trigger(trigger_id, config, target=target)
     epochs = int(classifier_cfg["smoke_epochs"] if smoke else classifier_cfg["epochs"])
     train_images = splits.train_images[: int(config["data"]["smoke_train_examples"])] if smoke else splits.train_images
     train_labels = splits.train_labels[: len(train_images)]
@@ -61,6 +66,8 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
     test_labels = splits.test_labels[: len(test_images)]
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    checkpoint_root = output_root / "checkpoints"
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
     poison_indices = select_poison_indices(
         train_labels,
         target=target,
@@ -85,8 +92,24 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
         best_state = None
         best_epoch = None
         history = []
+        start_epoch = 0
+        latest_path = checkpoint_root / f"{trigger_id}_seed{pair_seed}_{kind}_latest.pt"
+        if latest_path.exists():
+            checkpoint = torch.load(latest_path, map_location=device, weights_only=False)
+            if checkpoint.get("trigger_id") == trigger_id and checkpoint.get("pair_seed") == int(pair_seed) and checkpoint.get("kind") == kind:
+                model.load_state_dict(checkpoint["model_state"])
+                optimizer.load_state_dict(checkpoint["optimizer_state"])
+                scheduler.load_state_dict(checkpoint["scheduler_state"])
+                if checkpoint.get("scaler_state"):
+                    scaler.load_state_dict(checkpoint["scaler_state"])
+                best_state = checkpoint.get("best_state")
+                best_loss = float(checkpoint.get("best_loss", best_loss))
+                best_epoch = checkpoint.get("best_epoch")
+                history = checkpoint.get("history", [])
+                start_epoch = int(checkpoint.get("epoch", 0))
+                print(f"pair={pair_seed} model={kind} status=checkpoint_resumed epoch={start_epoch}/{epochs}", flush=True)
         started = time.time()
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             model.train()
             train_loss = examples = 0
             order = torch.randperm(
@@ -101,7 +124,7 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
                     poison = poison_mask[selected]
                     if poison.any():
                         images = images.clone()
-                        images[poison] = apply_mapping(patch, images[poison])
+                        images[poison] = apply_mapping(trigger, images[poison])
                         labels = labels.clone()
                         labels[poison] = target
                 images, labels = images.to(device), labels.to(device)
@@ -129,6 +152,17 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
                 best_loss = validation_loss
                 best_state = copy.deepcopy(model.state_dict())
                 best_epoch = epoch + 1
+            atomic_torch_save(
+                latest_path,
+                {
+                    "protocol": config["protocol"], "trigger_id": trigger_id,
+                    "pair_seed": int(pair_seed), "kind": kind, "epoch": epoch + 1,
+                    "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(), "scaler_state": scaler.state_dict(),
+                    "best_state": best_state, "best_loss": best_loss, "best_epoch": best_epoch,
+                    "history": history,
+                },
+            )
         if best_state is None or best_epoch is None:
             raise RuntimeError(f"No finite checkpoint was produced for {kind}")
         model.load_state_dict(best_state)
@@ -138,14 +172,14 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
             "model_kind": kind,
             "architecture": "cifar_resnet18",
             "target_label": target,
-            "patch": backdoor_cfg,
+            "trigger_id": trigger_id,
+            "trigger": config.get("triggers", {}).get(trigger_id, backdoor_cfg),
             "smoke": bool(smoke),
         }
-        trigger_id = str(backdoor_cfg["trigger_id"])
         destination = output_root / ("clean" if kind == "clean" else trigger_id) / f"seed{pair_seed}" / "attack_result.pt"
         destination.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"metadata": metadata, "model": best_state, "epoch": best_epoch}, destination)
-        metrics = classifier_metrics(model, test_images, test_labels, patch, target, batch_size=512, device=device)
+        metrics = classifier_metrics(model, test_images, test_labels, trigger, target, batch_size=512, device=device)
         results[kind] = {**metrics, "checkpoint": str(destination), "history": history, "elapsed_seconds": time.time() - started}
     controls = {
         "pair_seed": int(pair_seed),
@@ -158,10 +192,13 @@ def train_classifier_pair(splits, config, *, pair_seed: int, device: str, output
             for metrics in results.values()
         ),
         "backdoor_asr_passed": results["backdoor"]["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]),
-        "clean_patch_asr_passed": results["clean"]["patch_asr"] <= float(config["qualification"]["maximum_clean_patch_asr"]),
+        "clean_trigger_asr_passed": results["clean"]["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", config["qualification"].get("maximum_clean_trigger_asr", 0.10))),
+        "clean_patch_asr_passed": results["clean"]["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", config["qualification"].get("maximum_clean_trigger_asr", 0.10))),
     }
     controls["all_passed"] = all(value for key, value in controls.items() if key.endswith("_passed"))
-    atomic_write_json(output_root / f"controls_seed{pair_seed}.json", controls)
+    atomic_write_json(output_root / f"controls_{trigger_id}_seed{pair_seed}.json", controls)
+    if trigger_id == "badnets":
+        atomic_write_json(output_root / f"controls_seed{pair_seed}.json", controls)
     return controls
 
 

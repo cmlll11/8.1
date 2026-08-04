@@ -1,0 +1,95 @@
+protocol: MDL-FEATURE-v1
+run_name: multitype_feature_complexity_formal
+target_label: 0
+classifier_seeds: [0, 1, 2]
+trigger_ids: [badnets, blended, wanet, inputaware, low_frequency, ssba]
+
+data:
+  root: data/cifar10
+  split_seed: 2026
+  pair_examples: 1024
+  exclude_target_class: true
+
+classifier:
+  architecture: cifar_resnet18
+  epochs: 100
+  batch_size: 128
+  learning_rate: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  amp: true
+
+backdoor:
+  trigger_id: badnets
+  patch_size: 4
+  patch_top: 28
+  patch_left: 28
+  patch_value: [1.0, 1.0, 1.0]
+  poison_fraction: 0.10
+
+triggers:
+  badnets: {size: 4, top: 28, left: 28, value: [1.0, 1.0, 1.0]}
+  blended: {alpha: 0.20}
+  wanet: {strength: 0.08}
+  inputaware: {amplitude: 0.06}
+  low_frequency: {amplitude: 0.08, frequency: 2}
+  ssba: {amplitude: 0.025}
+
+targeted_uap:
+  epsilon_candidates: [0.06274509803921569, 0.09411764705882353, 0.12549019607843137]
+  restarts: 2
+  epochs_per_epsilon: 30
+  batch_size: 256
+  learning_rate: 0.01
+  confidence: 0.0
+  cross_entropy_weight: 0.1
+  success_patience: 2
+
+qualification:
+  minimum_clean_accuracy: 0.90
+  minimum_backdoor_asr: 0.90
+  maximum_clean_patch_asr: 0.10
+  minimum_adversarial_asr: 0.90
+
+layers:
+  candidates: [stem, layer1.0, layer1, layer2, layer3]
+  fallback: [layer4]
+
+assets:
+  models:
+    clean: artifacts/multitype_models/clean/seed{seed}/attack_result.pt
+    backdoor: artifacts/multitype_models/{trigger}/seed{seed}/attack_result.pt
+  pairs:
+    uap: artifacts/multitype_pairs/uap/seed{seed}.pt
+    trigger: artifacts/multitype_pairs/{trigger}/seed{seed}.pt
+  uap_mapping: artifacts/multitype_mappings/uap/seed{seed}.pt
+
+observation:
+  batch_size: 128
+  summary_examples: 256
+  similarity_examples: 128
+  bootstrap_samples: 200
+  auc_threshold: 0.80
+  minimum_source_asr: 0.90
+  maximum_source_asr_gap: 0.05
+  indistinguishable_consecutive_layers: 2
+
+fitting:
+  families: [mean_shift, feature_re, fitnets, residual_adapter, spatial_gated_fitnets, input_conditioned_fitnets, frequency_basis_residual]
+  ranks: [1, 4, 8]
+  spatial_gated_ranks: [8, 16, 32, 64]
+  fit_seeds: [0]
+  fitnets_kernels: [1, 3]
+  feature_re_mask_penalties: [0.0, 0.001]
+  steps: 2000
+  validation_interval: 25
+  progress_interval: 250
+  cpu_threads_per_process: 2
+  learning_rate: 0.001
+  gradient_clip_norm: 5.0
+  batch_size: 128
+  pruning: [0.0, 0.75, 0.90]
+  quantization: [fp32, int8, int4]
+  nrmse_threshold: 0.10
+  maximum_asr_gap: 0.05
+

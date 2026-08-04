@@ -16,6 +16,8 @@ FAMILY_IDS = {
     "fitnets": 2,
     "residual_adapter": 3,
     "spatial_gated_fitnets": 4,
+    "input_conditioned_fitnets": 5,
+    "frequency_basis_residual": 6,
 }
 
 

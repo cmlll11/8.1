@@ -22,6 +22,10 @@ class CandidateSpec:
             return f"fitnets-k{self.kernel}-r{self.rank}-s{self.fit_seed}"
         if self.family == "spatial_gated_fitnets":
             return f"spatial_gated_fitnets-r{self.rank}-s{self.fit_seed}"
+        if self.family == "input_conditioned_fitnets":
+            return f"input_conditioned_fitnets-k{self.kernel}-r{self.rank}-s{self.fit_seed}"
+        if self.family == "frequency_basis_residual":
+            return f"frequency_basis_residual-r{self.rank}-s{self.fit_seed}"
         return f"{self.family}-r{self.rank}-s{self.fit_seed}"
 
     def structure(self) -> dict[str, int | float | str]:
@@ -48,6 +52,8 @@ def candidate_specs(
         "fitnets",
         "residual_adapter",
         "spatial_gated_fitnets",
+        "input_conditioned_fitnets",
+        "frequency_basis_residual",
     }
     unknown = set(families) - allowed
     if unknown:
@@ -78,6 +84,17 @@ def candidate_specs(
             for rank in spatial_gated_ranks:
                 for fit_seed in fit_seeds:
                     specs.append(CandidateSpec(family, int(rank), 3, 0.0, int(fit_seed)))
+        elif family == "input_conditioned_fitnets":
+            for kernel in fitnets_kernels:
+                if int(kernel) not in (1, 3):
+                    raise ValueError("Input-conditioned kernels must be 1 or 3")
+                for rank in ranks:
+                    for fit_seed in fit_seeds:
+                        specs.append(CandidateSpec(family, int(rank), int(kernel), 0.0, int(fit_seed)))
+        elif family == "frequency_basis_residual":
+            for rank in ranks:
+                for fit_seed in fit_seeds:
+                    specs.append(CandidateSpec(family, int(rank), 1, 0.0, int(fit_seed)))
     if len({spec.key for spec in specs}) != len(specs):
         raise ValueError("Feature fitting candidate keys are not unique")
     return specs
@@ -109,3 +126,34 @@ def minimum_bits_by_threshold(rows: list[dict], thresholds: list[float]) -> dict
             "source_asr": best["source_asr"],
         }
     return result
+
+
+def minimum_bits(rows: list[dict], *, nrmse_threshold: float, require_activation: bool = False) -> dict | None:
+    """Select the minimum MDL candidate using validation-qualified rows.
+
+    Rows produced by the multitype runner carry validation and test metrics.
+    Selection is deliberately validation-only; test values are reported after
+    the candidate has been selected.
+    """
+    valid = [
+        row for row in rows
+        if float(row.get("validation_nrmse", float("inf"))) <= float(nrmse_threshold)
+        and (not require_activation or bool(row.get("activation_valid", False)))
+    ]
+    if not valid:
+        return None
+    best = min(valid, key=lambda row: (int(row["bits"]["total_bits"]), float(row["validation_nrmse"]), float(row.get("test_nrmse", float("inf")))))
+    return {
+        "total_bits": int(best["bits"]["total_bits"]),
+        "candidate_key": best["candidate_key"],
+        "family": best["family"],
+        "rank": best["rank"],
+        "kernel": best["kernel"],
+        "pruning": best["pruning"],
+        "quantization": best["quantization"],
+        "validation_nrmse": best["validation_nrmse"],
+        "test_nrmse": best["test_nrmse"],
+        "source_asr": best.get("source_asr"),
+        "fitted_asr": best.get("fitted_asr"),
+        "activation_valid": bool(best.get("activation_valid", False)),
+    }

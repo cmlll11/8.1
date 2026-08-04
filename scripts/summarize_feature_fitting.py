@@ -21,7 +21,7 @@ def load_completed(path: Path) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pair-seed", type=int, required=True)
-    parser.add_argument("--root", default="outputs/paper_feature_fitting")
+    parser.add_argument("--root", default="outputs/spatial_gated_feature_fitting")
     args = parser.parse_args()
     seed_root = Path(args.root) / f"seed{args.pair_seed}"
     paths = {condition: seed_root / condition / "results.json" for condition in CONDITIONS}

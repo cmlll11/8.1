@@ -5,4 +5,4 @@ PAIR_SEED="${1:-0}"
 
 python scripts/summarize_feature_fitting.py \
   --pair-seed "$PAIR_SEED" \
-  --root outputs/paper_feature_fitting
+  --root outputs/spatial_gated_feature_fitting

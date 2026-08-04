@@ -24,3 +24,15 @@ def test_fp32_without_pruning_preserves_output():
     result = compress_feature_mapping(model, pruning=0.0, quantization="fp32")
 
     assert torch.equal(model(images), result.model(images))
+
+
+def test_compression_preserves_spatial_support_buffer():
+    support = torch.zeros(4, 4, dtype=torch.bool)
+    support[1:3, 2:4] = True
+    model = build_feature_mapping(
+        "spatial_gated_fitnets", (3, 4, 4), rank=2, spatial_support=support
+    )
+
+    result = compress_feature_mapping(model, pruning=0.5, quantization="int8")
+
+    assert torch.equal(result.model.support_mask.cpu().reshape(4, 4), support)

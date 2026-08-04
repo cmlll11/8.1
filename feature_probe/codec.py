@@ -10,7 +10,13 @@ from . import PROTOCOL
 
 
 QUANTIZATION_BITS = {"fp32": 32, "int8": 8, "int4": 4}
-FAMILY_IDS = {"mean_shift": 0, "feature_re": 1, "fitnets": 2, "residual_adapter": 3}
+FAMILY_IDS = {
+    "mean_shift": 0,
+    "feature_re": 1,
+    "fitnets": 2,
+    "residual_adapter": 3,
+    "spatial_gated_fitnets": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,11 @@ def count_feature_mapping_bits(
         for name, value in model.state_dict().items()
         if value.is_floating_point()
     ]
+    binary_masks = [
+        (name, value.detach().cpu())
+        for name, value in model.state_dict().items()
+        if value.dtype == torch.bool
+    ]
     if any(not torch.isfinite(value).all() for _, value in named_tensors):
         raise ValueError("Cannot encode non-finite feature mapping parameters")
     total = sum(value.numel() for _, value in named_tensors)
@@ -88,7 +99,12 @@ def count_feature_mapping_bits(
     structure_bits = _string_bits(layer_id) + family_id_bits + quantizer_id_bits + 32 * 2 + 16
     for _, value in named_tensors:
         structure_bits += 8 + 32 * value.ndim
+    structure_bits += 16
+    for _, value in binary_masks:
+        structure_bits += 8 + 32 * value.ndim
     mask_bits = 1 if dense else _enumerative_mask_bits(total, transmitted)
+    for _, value in binary_masks:
+        mask_bits += _enumerative_mask_bits(value.numel(), int(value.sum()))
     scale_bits = 0
     if quantization != "fp32":
         scale_bits = 32 * sum(

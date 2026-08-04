@@ -119,6 +119,85 @@ class ResidualAdapter(nn.Module):
         return z + self.adapter(z)
 
 
+def derive_spatial_support(
+    clean: torch.Tensor,
+    mapped: torch.Tensor,
+    *,
+    relative_threshold: float = 1e-6,
+) -> torch.Tensor:
+    """Derive a train-only spatial support from average paired feature change."""
+
+    if clean.shape != mapped.shape or clean.ndim != 4:
+        raise ValueError("clean and mapped features must have the same NCHW shape")
+    if not 0.0 <= float(relative_threshold) < 1.0:
+        raise ValueError("relative_threshold must be in [0, 1)")
+    energy = (mapped - clean).abs().mean(dim=(0, 1))
+    maximum = energy.max()
+    if maximum.item() == 0.0:
+        raise ValueError("Cannot derive support from an all-zero feature change")
+    support = energy > maximum * float(relative_threshold)
+    if not support.any():
+        raise RuntimeError("Derived spatial support is empty")
+    return support
+
+
+class SpatiallyGatedHintRegressor(nn.Module):
+    """FeatureRE spatial gating plus a coordinate-aware FitNets regressor."""
+
+    closed_form = False
+
+    def __init__(self, shape: tuple[int, int, int], rank: int, support: torch.Tensor):
+        super().__init__()
+        channels, height, width = (int(value) for value in shape)
+        if support.shape != (height, width) or support.dtype != torch.bool:
+            raise ValueError("support must be a boolean mask matching the feature spatial shape")
+        if int(rank) < 1:
+            raise ValueError("rank must be positive")
+        self.register_buffer("support_mask", support.reshape(1, 1, height, width).clone())
+        y = torch.linspace(-1.0, 1.0, height)
+        x = torch.linspace(-1.0, 1.0, width)
+        grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+        self.register_buffer(
+            "coordinate_grid",
+            torch.stack((grid_y, grid_x)).reshape(1, 2, height, width),
+            persistent=False,
+        )
+        self.spatial_bias = nn.Parameter(torch.zeros(1, channels, height, width))
+        self.regressor = nn.Sequential(
+            nn.Conv2d(channels + 3, int(rank), 3, padding=1, bias=True),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(int(rank), int(rank), 3, padding=1, bias=True),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(int(rank), channels, 1, bias=True),
+        )
+        nn.init.zeros_(self.regressor[-1].weight)
+        nn.init.zeros_(self.regressor[-1].bias)
+
+    def forward(self, z):
+        support = self.support_mask.to(dtype=z.dtype)
+        coordinates = self.coordinate_grid.to(dtype=z.dtype).expand(len(z), -1, -1, -1)
+        context = torch.cat((z, coordinates, support.expand(len(z), -1, -1, -1)), dim=1)
+        residual = self.spatial_bias + self.regressor(context)
+        return z + support * residual
+
+    @torch.no_grad()
+    def initialize_from_batches(self, batches) -> None:
+        total = torch.zeros_like(self.spatial_bias)
+        examples = 0
+        for clean, target in batches:
+            total += (target - clean).sum(0, keepdim=True)
+            examples += len(clean)
+        if examples == 0:
+            raise ValueError("Cannot initialize from an empty feature-pair loader")
+        self.spatial_bias.copy_(total / examples * self.support_mask)
+
+    def training_loss(self, predicted, target, clean) -> torch.Tensor:
+        support = self.support_mask.to(dtype=predicted.dtype)
+        squared_error = (predicted - target).square() * support
+        denominator = len(predicted) * predicted.shape[1] * int(self.support_mask.sum())
+        return squared_error.sum() / max(denominator, 1)
+
+
 def build_feature_mapping(
     family: str,
     feature_shape: tuple[int, int, int],
@@ -126,6 +205,7 @@ def build_feature_mapping(
     rank: int = 1,
     kernel: int = 1,
     mask_penalty: float = 0.0,
+    spatial_support: torch.Tensor | None = None,
 ) -> nn.Module:
     channels = int(feature_shape[0])
     if family == "mean_shift":
@@ -136,6 +216,10 @@ def build_feature_mapping(
         return FitNetsHintRegressor(channels, int(rank), int(kernel))
     if family == "residual_adapter":
         return ResidualAdapter(channels)
+    if family == "spatial_gated_fitnets":
+        if spatial_support is None:
+            raise ValueError("spatial_gated_fitnets requires a spatial support mask")
+        return SpatiallyGatedHintRegressor(feature_shape, int(rank), spatial_support)
     raise ValueError(f"Unknown feature mapping family: {family}")
 
 
@@ -189,6 +273,8 @@ def fit_feature_mapping(
             progress_callback(record)
         return FitResult(model=model, best_validation_nrmse=validation, history=[record])
 
+    if hasattr(model, "initialize_from_batches"):
+        model.initialize_from_batches(train_batches)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise ValueError("Trainable feature mapping has no trainable parameters")
@@ -205,7 +291,11 @@ def fit_feature_mapping(
             clean, target = next(train_iterator)
         clean, target = clean.to(device), target.to(device)
         predicted = model(clean)
-        mse = F.mse_loss(predicted, target)
+        mse = (
+            model.training_loss(predicted, target, clean)
+            if hasattr(model, "training_loss")
+            else F.mse_loss(predicted, target)
+        )
         regularization = (
             model.regularization_loss()
             if hasattr(model, "regularization_loss")

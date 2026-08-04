@@ -9,4 +9,4 @@ python scripts/run_feature_fitting.py configs/forward_smoke.yaml \
   --pair-seed "$PAIR_SEED" \
   --condition "$CONDITION" \
   --device "$DEVICE" \
-  --output-root outputs/paper_feature_fitting
+  --output-root outputs/spatial_gated_feature_fitting

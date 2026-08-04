@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from feature_probe.fitters import (
     DeviceTensorBatches,
     build_feature_mapping,
+    derive_spatial_support,
     evaluate_feature_mapping,
     fit_feature_mapping,
     normalized_rmse,
@@ -102,3 +103,44 @@ def test_mse_training_and_validation_stay_finite_for_tiny_change():
     assert progress == result.history
     assert math.isfinite(result.best_validation_nrmse)
     assert math.isfinite(evaluate_feature_mapping(result.model, loader, device="cpu"))
+
+
+def test_spatial_support_is_derived_from_changed_region_only():
+    clean = torch.zeros(6, 2, 5, 5)
+    mapped = clean.clone()
+    mapped[:, :, 3:, 2:4] = 1.0
+
+    support = derive_spatial_support(clean, mapped)
+
+    expected = torch.zeros(5, 5, dtype=torch.bool)
+    expected[3:, 2:4] = True
+    assert torch.equal(support, expected)
+
+
+def test_spatially_gated_regressor_fits_input_dependent_local_change():
+    torch.manual_seed(3)
+    clean = torch.randn(64, 2, 6, 6)
+    mapped = clean.clone()
+    mapped[:, 0, 4:, 4:] += 0.75 * clean[:, 1, 4:, 4:] + 0.2
+    mapped[:, 1, 4:, 4:] += -0.5 * clean[:, 0, 4:, 4:] - 0.1
+    loader = DataLoader(TensorDataset(clean, mapped), batch_size=16, shuffle=True)
+    support = derive_spatial_support(clean, mapped)
+    model = build_feature_mapping(
+        "spatial_gated_fitnets", (2, 6, 6), rank=8, spatial_support=support
+    )
+
+    result = fit_feature_mapping(
+        model,
+        loader,
+        loader,
+        steps=250,
+        learning_rate=1e-2,
+        device="cpu",
+        validation_interval=25,
+    )
+
+    assert result.best_validation_nrmse < 0.12
+    outside = ~support
+    with torch.no_grad():
+        predicted = result.model(clean)
+    assert torch.equal(predicted[:, :, outside], clean[:, :, outside])

@@ -24,6 +24,17 @@ uncomputable global minimum description length.
    feature matching loss.
 4. `residual_adapter` uses the parallel 1x1 residual adapter of Rebuffi et al.
    and the same paired feature MSE.
+5. `spatial_gated_fitnets` is the positive-control repair motivated by the
+   first demo. It combines FeatureRE-style spatial gating with a FitNets-style
+   input-dependent regressor:
+
+   `z_mapped = z + support * (spatial_bias + regressor(z, x_coord, y_coord))`.
+
+   `support` is derived only from the training-pair feature changes. It is
+   frozen before validation/test evaluation and its exact binary positions are
+   charged by the MDL code. The regressor loss is normalized over this support,
+   preventing a fixed-location Trigger from being overwhelmed by unchanged
+   spatial positions.
 
 These are adaptations of published feature transformations to the forward
 paired-regression question. They are not claims of reproducing the complete
@@ -55,6 +66,7 @@ not the original float model, is then evaluated. The two-part code charges:
 - protocol, layer and family identifiers;
 - architecture fields and all tensor shapes;
 - sparse coordinates under an enumerative mask code;
+- the train-derived spatial support used by a gated mapper;
 - one float32 scale per transmitted quantized tensor;
 - the transmitted fp32, int8 or int4 parameter values.
 
@@ -69,10 +81,10 @@ reported `minimum_bits` is the smallest admissible code in this candidate set.
 Run the four conditions on four GPUs, using a distinct log for each process:
 
 ```bash
-nohup bash bash/07_feature_fitting_demo.sh cuda:0 uap_clean 0 > outputs/paper_fit_uap_clean.log 2>&1 &
-nohup bash bash/07_feature_fitting_demo.sh cuda:1 trigger_backdoor 0 > outputs/paper_fit_trigger_backdoor.log 2>&1 &
-nohup bash bash/07_feature_fitting_demo.sh cuda:2 uap_backdoor 0 > outputs/paper_fit_uap_backdoor.log 2>&1 &
-nohup bash bash/07_feature_fitting_demo.sh cuda:3 trigger_clean 0 > outputs/paper_fit_trigger_clean.log 2>&1 &
+nohup bash bash/07_feature_fitting_demo.sh cuda:0 uap_clean 0 > outputs/gated_fit_uap_clean.log 2>&1 &
+nohup bash bash/07_feature_fitting_demo.sh cuda:1 trigger_backdoor 0 > outputs/gated_fit_trigger_backdoor.log 2>&1 &
+nohup bash bash/07_feature_fitting_demo.sh cuda:2 uap_backdoor 0 > outputs/gated_fit_uap_backdoor.log 2>&1 &
+nohup bash bash/07_feature_fitting_demo.sh cuda:3 trigger_clean 0 > outputs/gated_fit_trigger_clean.log 2>&1 &
 ```
 
 After all four report `status=completed`:

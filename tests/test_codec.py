@@ -47,3 +47,23 @@ def test_family_and_shape_are_charged_in_structure_code():
     assert bits.total_bits == sum(
         [bits.header_bits, bits.structure_bits, bits.mask_bits, bits.scale_bits, bits.value_bits]
     )
+
+
+def test_spatial_support_mask_is_charged():
+    support = torch.zeros(4, 4, dtype=torch.bool)
+    support[-2:, -2:] = True
+    model = build_feature_mapping(
+        "spatial_gated_fitnets", (3, 4, 4), rank=2, spatial_support=support
+    )
+
+    bits = count_feature_mapping_bits(
+        model,
+        layer_id="stem",
+        family="spatial_gated_fitnets",
+        rank=2,
+        kernel=3,
+        quantization="int8",
+        pruning=0.0,
+    )
+
+    assert bits.mask_bits > 1

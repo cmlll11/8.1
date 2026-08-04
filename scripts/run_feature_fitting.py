@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -17,6 +18,7 @@ from feature_probe.config import load_config, render_asset_path
 from feature_probe.fitters import (
     DeviceTensorBatches,
     build_feature_mapping,
+    derive_spatial_support,
     evaluate_feature_mapping,
     fit_feature_mapping,
 )
@@ -44,7 +46,7 @@ def main():
     parser.add_argument("--condition", choices=tuple(CONDITIONS), required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--observation", default=None)
-    parser.add_argument("--output-root", default="outputs/paper_feature_fitting")
+    parser.add_argument("--output-root", default="outputs/spatial_gated_feature_fitting")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--fit-seeds", type=int, nargs="+", default=None)
     args = parser.parse_args()
@@ -98,6 +100,17 @@ def main():
     del features
     gc.collect()
     batch_size = int(fitting["batch_size"])
+    spatial_support = derive_spatial_support(
+        train.clean,
+        train.mapped,
+        relative_threshold=float(fitting["spatial_support_relative_threshold"]),
+    ).detach().cpu()
+    support_sha256 = hashlib.sha256(spatial_support.numpy().tobytes()).hexdigest()
+    print(
+        f"condition={args.condition} layer={layer} "
+        f"spatial_support={int(spatial_support.sum())}/{spatial_support.numel()}",
+        flush=True,
+    )
     validation_loader = DeviceTensorBatches(
         validation.clean, validation.mapped, batch_size=batch_size, shuffle=False
     )
@@ -133,11 +146,18 @@ def main():
         "feature_re_mask_penalties": [
             float(value) for value in fitting["feature_re_mask_penalties"]
         ],
+        "spatial_gated_ranks": [int(value) for value in fitting["spatial_gated_ranks"]],
+        "spatial_support_relative_threshold": float(
+            fitting["spatial_support_relative_threshold"]
+        ),
+        "spatial_support_shape": list(spatial_support.shape),
+        "spatial_support_values": int(spatial_support.sum()),
+        "spatial_support_sha256": support_sha256,
         "pruning_grid": [float(value) for value in fitting["pruning"]],
         "quantization_grid": [str(value) for value in fitting["quantization"]],
         "training_objective": "feature_mse",
         "evaluation_metric": "global_relative_frobenius_nrmse",
-        "description_length": "MDL-FEATURE-v1-two-part-code",
+        "description_length": "MDL-FEATURE-v1-fitting-codec-2",
         "learning_rate": float(fitting["learning_rate"]),
         "gradient_clip_norm": float(fitting["gradient_clip_norm"]),
     }
@@ -157,6 +177,11 @@ def main():
             "ranks",
             "fitnets_kernels",
             "feature_re_mask_penalties",
+            "spatial_gated_ranks",
+            "spatial_support_relative_threshold",
+            "spatial_support_shape",
+            "spatial_support_values",
+            "spatial_support_sha256",
             "pruning_grid",
             "quantization_grid",
             "training_objective",
@@ -175,6 +200,7 @@ def main():
         selected_fit_seeds,
         fitnets_kernels=fitting["fitnets_kernels"],
         feature_re_mask_penalties=fitting["feature_re_mask_penalties"],
+        spatial_gated_ranks=fitting["spatial_gated_ranks"],
     )
     total_candidates = len(specs)
 
@@ -212,6 +238,7 @@ def main():
             rank=spec.rank,
             kernel=spec.kernel,
             mask_penalty=spec.mask_penalty,
+            spatial_support=spatial_support,
         )
         checkpoint_path = output_dir / "checkpoints" / f"{spec.key}.pt"
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)

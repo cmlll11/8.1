@@ -9,7 +9,8 @@ The first milestone provides:
 - manifest and environment validation;
 - model-agnostic shallow feature interception at named PyTorch modules;
 - paired feature-change metrics;
-- paper-backed FeatureRE, FitNets and Residual Adapter feature mappers;
+- paper-backed FeatureRE, FitNets and Residual Adapter feature mappers, plus a
+  spatially gated positive-control regressor;
 - the fixed `MDL-FEATURE-v1` bit counter;
 - a synthetic smoke test that checks the full software chain without training
   a classifier or searching a trigger.

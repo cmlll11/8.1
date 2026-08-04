@@ -20,6 +20,8 @@ class CandidateSpec:
             return f"feature_re-lambda{penalty}-s{self.fit_seed}"
         if self.family == "fitnets":
             return f"fitnets-k{self.kernel}-r{self.rank}-s{self.fit_seed}"
+        if self.family == "spatial_gated_fitnets":
+            return f"spatial_gated_fitnets-r{self.rank}-s{self.fit_seed}"
         return f"{self.family}-r{self.rank}-s{self.fit_seed}"
 
     def structure(self) -> dict[str, int | float | str]:
@@ -38,8 +40,15 @@ def candidate_specs(
     *,
     fitnets_kernels: list[int],
     feature_re_mask_penalties: list[float],
+    spatial_gated_ranks: list[int],
 ) -> list[CandidateSpec]:
-    allowed = {"mean_shift", "feature_re", "fitnets", "residual_adapter"}
+    allowed = {
+        "mean_shift",
+        "feature_re",
+        "fitnets",
+        "residual_adapter",
+        "spatial_gated_fitnets",
+    }
     unknown = set(families) - allowed
     if unknown:
         raise ValueError(f"Unknown feature fitting families: {sorted(unknown)}")
@@ -63,6 +72,12 @@ def candidate_specs(
         elif family == "residual_adapter":
             for fit_seed in fit_seeds:
                 specs.append(CandidateSpec(family, 0, 1, 0.0, int(fit_seed)))
+        elif family == "spatial_gated_fitnets":
+            if any(int(rank) < 1 for rank in spatial_gated_ranks):
+                raise ValueError("All spatial-gated ranks must be positive")
+            for rank in spatial_gated_ranks:
+                for fit_seed in fit_seeds:
+                    specs.append(CandidateSpec(family, int(rank), 3, 0.0, int(fit_seed)))
     if len({spec.key for spec in specs}) != len(specs):
         raise ValueError("Feature fitting candidate keys are not unique")
     return specs

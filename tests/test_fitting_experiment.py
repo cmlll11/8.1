@@ -3,16 +3,18 @@ from feature_probe.fitting_experiment import candidate_specs, minimum_bits_by_th
 
 def test_candidate_grid_uses_published_families_without_duplicate_keys():
     specs = candidate_specs(
-        ["mean_shift", "feature_re", "fitnets", "residual_adapter"],
+        ["mean_shift", "feature_re", "fitnets", "residual_adapter", "spatial_gated_fitnets"],
         [1, 2],
         [0, 1],
         fitnets_kernels=[1, 3],
         feature_re_mask_penalties=[0.0, 1e-3],
+        spatial_gated_ranks=[2, 4],
     )
 
-    assert len(specs) == 15
+    assert len(specs) == 19
     assert len({spec.key for spec in specs}) == len(specs)
     assert sum(spec.family == "mean_shift" for spec in specs) == 1
+    assert sum(spec.family == "spatial_gated_fitnets" for spec in specs) == 4
 
 
 def test_minimum_bits_requires_error_and_functional_fidelity():

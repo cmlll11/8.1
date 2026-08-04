@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from _bootstrap import ROOT  # noqa: F401
 from feature_probe.artifacts import load_classifier
 from feature_probe.cifar10 import load_cifar10
 from feature_probe.config import load_config, render_asset_path
+from feature_probe.experiment import make_run_id, utc_now, write_run_manifest
 from feature_probe.mappings import set_mapping_eval
 from feature_probe.pairs import build_pair_bundle, save_pair_bundle
 from feature_probe.training import mapping_asr, train_classifier_pair
@@ -23,6 +25,7 @@ def main():
     parser.add_argument("--trigger", nargs="+", default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--run-id", default=None)
     args = parser.parse_args()
     config = load_config(args.config)
     seeds = [int(v) for v in (args.seed or config["classifier_seeds"])]
@@ -32,22 +35,25 @@ def main():
         raise ValueError(f"Triggers are not registered in config: {sorted(unknown)}")
     splits = load_cifar10(config["data"]["root"], split_seed=config["data"]["split_seed"], download=args.download)
     pair_count = int(config["data"].get("pair_examples", 1024))
-    output = {"protocol": config["protocol"], "seeds": seeds, "triggers": triggers, "runs": []}
+    run_id = args.run_id or make_run_id("multitype_assets")
+    manifest_path = Path("artifacts/multitype_models") / f"run_{run_id}.json"
+    output = {"protocol": config["protocol"], "run_id": run_id, "command": " ".join(sys.argv), "started_at": utc_now(), "seeds": seeds, "triggers": triggers, "runs": []}
+    write_run_manifest(manifest_path, output)
     for seed in seeds:
         # The training function writes both clean and the requested backdoor
         # model.  It is intentionally deterministic and records the recipe.
         for trigger_id in triggers:
-            controls = train_classifier_pair(
-                splits,
-                config,
-                pair_seed=seed,
-                device=args.device,
-                output_root="artifacts/multitype_models",
-                trigger_id=trigger_id,
-                smoke=False,
-            )
             clean_path = render_asset_path(config["assets"]["models"]["clean"], seed=seed)
             backdoor_path = render_asset_path(config["assets"]["models"]["backdoor"], seed=seed, trigger=trigger_id)
+            controls_path = Path("artifacts/multitype_models") / f"controls_{trigger_id}_seed{seed}.json"
+            if clean_path.exists() and backdoor_path.exists() and controls_path.exists():
+                controls = json.loads(controls_path.read_text(encoding="utf-8"))
+                print(f"seed={seed} trigger={trigger_id} status=assets_resumed", flush=True)
+            else:
+                controls = train_classifier_pair(
+                    splits, config, pair_seed=seed, device=args.device,
+                    output_root="artifacts/multitype_models", trigger_id=trigger_id, smoke=False,
+                )
             clean_model = load_classifier(clean_path, device=args.device)
             backdoor_model = load_classifier(backdoor_path, device=args.device)
             uap_path = Path(config["assets"]["uap_mapping"].format(seed=seed))
@@ -100,11 +106,13 @@ def main():
                 ),
             }
             output["runs"].append(run)
+            write_run_manifest(manifest_path, output)
             print(json.dumps(run, indent=2, ensure_ascii=False), flush=True)
+    output["finished_at"] = utc_now()
+    write_run_manifest(manifest_path, output)
     atomic_write_json("artifacts/multitype_models/manifest.json", output)
     print(json.dumps({"status": "completed", "runs": len(output["runs"]), "manifest": "artifacts/multitype_models/manifest.json"}, indent=2))
 
 
 if __name__ == "__main__":
     main()
-

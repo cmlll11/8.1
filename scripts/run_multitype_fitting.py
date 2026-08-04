@@ -5,6 +5,7 @@ import gc
 import json
 import math
 from pathlib import Path
+import sys
 
 import torch
 
@@ -14,6 +15,7 @@ from feature_probe.artifacts import load_classifier, load_pair_bundle
 from feature_probe.codec import count_feature_mapping_bits
 from feature_probe.compression import compress_feature_mapping
 from feature_probe.config import load_config, render_asset_path
+from feature_probe.experiment import make_run_id, utc_now, write_run_manifest
 from feature_probe.fitters import (
     DeviceTensorBatches,
     build_feature_mapping,
@@ -63,6 +65,13 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     rows = []
+    result_path = output_dir / "results.json"
+    if result_path.exists():
+        previous = json.loads(result_path.read_text(encoding="utf-8"))
+        if previous.get("seed") == seed and previous.get("trigger_id") == trigger_id and previous.get("layer") == layer and previous.get("condition") == condition:
+            rows = previous.get("rows", [])
+    completed_variants = {(str(row["candidate_key"]), float(row["pruning"]), str(row["quantization"])) for row in rows}
+    run_id = make_run_id(f"fit_{trigger_id}_{layer}_{condition}")
     for spec in specs:
         torch.manual_seed(30_000 + seed * 1_000 + spec.fit_seed)
         mapper = build_feature_mapping(spec.family, tuple(train.clean.shape[1:]), rank=spec.rank, kernel=spec.kernel, mask_penalty=spec.mask_penalty, spatial_support=support)
@@ -85,6 +94,9 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
             atomic_torch_save(checkpoint_path, {"protocol": PROTOCOL, "candidate_key": spec.key, "layer": layer, "state_dict": cpu_state_dict(mapper), "validation_nrmse": validation_dense})
         for pruning in fitting["pruning"]:
             for quantization in fitting["quantization"]:
+                variant_key = (spec.key, float(pruning), str(quantization))
+                if variant_key in completed_variants:
+                    continue
                 compressed = compress_feature_mapping(mapper, pruning=float(pruning), quantization=str(quantization))
                 validation_nrmse = evaluate_feature_mapping(compressed.model, validation_loader, device=device)
                 test_nrmse = evaluate_feature_mapping(compressed.model, test_loader, device=device)
@@ -105,11 +117,18 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
                     "asr_gap": abs(float(fitted_asr) - float(source_asr)), "activation_valid": activation_valid,
                     "bits": bits, "checkpoint": str(checkpoint_path),
                 })
+                completed_variants.add(variant_key)
+                atomic_write_json(result_path, {
+                    "status": "running", "protocol": PROTOCOL, "run_id": run_id,
+                    "command": " ".join(sys.argv), "started_at": utc_now(),
+                    "seed": seed, "trigger_id": trigger_id, "condition": condition, "layer": layer,
+                    "source_asr": source_asr, "nrmse_threshold": float(fitting["nrmse_threshold"]), "rows": rows,
+                })
         del mapper
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
     payload = {
-        "status": "completed", "protocol": PROTOCOL, "seed": seed, "trigger_id": trigger_id,
+        "status": "completed", "protocol": PROTOCOL, "run_id": run_id, "seed": seed, "trigger_id": trigger_id,
         "condition": condition, "layer": layer, "source_asr": source_asr,
         "nrmse_threshold": float(fitting["nrmse_threshold"]), "rows": rows,
         "minimum_fit": minimum_bits(rows, nrmse_threshold=float(fitting["nrmse_threshold"])),
@@ -117,7 +136,9 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
         "model": {"path": str(model_path), "sha256": sha256_file(model_path)},
         "pair": {"path": str(pair_path), "sha256": sha256_file(pair_path)},
     }
-    atomic_write_json(output_dir / "results.json", payload)
+    payload["started_at"] = payload.get("started_at", utc_now())
+    payload["finished_at"] = utc_now()
+    atomic_write_json(result_path, payload)
     return payload
 
 
@@ -149,4 +170,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -11,7 +11,7 @@ from .cifar10 import augment_batch, select_poison_indices
 from .mappings import apply_mapping, set_mapping_eval
 from .models import CifarResNet18
 from .triggers import build_trigger
-from .utils import atomic_write_json
+from .utils import atomic_torch_save, atomic_write_json
 
 
 def batches(images, labels, *, batch_size: int, seed: int, shuffle: bool):
@@ -66,6 +66,8 @@ def train_classifier_pair(
     test_labels = splits.test_labels[: len(test_images)]
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    checkpoint_root = output_root / "checkpoints"
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
     poison_indices = select_poison_indices(
         train_labels,
         target=target,
@@ -90,8 +92,24 @@ def train_classifier_pair(
         best_state = None
         best_epoch = None
         history = []
+        start_epoch = 0
+        latest_path = checkpoint_root / f"{trigger_id}_seed{pair_seed}_{kind}_latest.pt"
+        if latest_path.exists():
+            checkpoint = torch.load(latest_path, map_location=device, weights_only=False)
+            if checkpoint.get("trigger_id") == trigger_id and checkpoint.get("pair_seed") == int(pair_seed) and checkpoint.get("kind") == kind:
+                model.load_state_dict(checkpoint["model_state"])
+                optimizer.load_state_dict(checkpoint["optimizer_state"])
+                scheduler.load_state_dict(checkpoint["scheduler_state"])
+                if checkpoint.get("scaler_state"):
+                    scaler.load_state_dict(checkpoint["scaler_state"])
+                best_state = checkpoint.get("best_state")
+                best_loss = float(checkpoint.get("best_loss", best_loss))
+                best_epoch = checkpoint.get("best_epoch")
+                history = checkpoint.get("history", [])
+                start_epoch = int(checkpoint.get("epoch", 0))
+                print(f"pair={pair_seed} model={kind} status=checkpoint_resumed epoch={start_epoch}/{epochs}", flush=True)
         started = time.time()
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             model.train()
             train_loss = examples = 0
             order = torch.randperm(
@@ -134,6 +152,17 @@ def train_classifier_pair(
                 best_loss = validation_loss
                 best_state = copy.deepcopy(model.state_dict())
                 best_epoch = epoch + 1
+            atomic_torch_save(
+                latest_path,
+                {
+                    "protocol": config["protocol"], "trigger_id": trigger_id,
+                    "pair_seed": int(pair_seed), "kind": kind, "epoch": epoch + 1,
+                    "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(), "scaler_state": scaler.state_dict(),
+                    "best_state": best_state, "best_loss": best_loss, "best_epoch": best_epoch,
+                    "history": history,
+                },
+            )
         if best_state is None or best_epoch is None:
             raise RuntimeError(f"No finite checkpoint was produced for {kind}")
         model.load_state_dict(best_state)
@@ -167,7 +196,9 @@ def train_classifier_pair(
         "clean_patch_asr_passed": results["clean"]["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", config["qualification"].get("maximum_clean_trigger_asr", 0.10))),
     }
     controls["all_passed"] = all(value for key, value in controls.items() if key.endswith("_passed"))
-    atomic_write_json(output_root / f"controls_seed{pair_seed}.json", controls)
+    atomic_write_json(output_root / f"controls_{trigger_id}_seed{pair_seed}.json", controls)
+    if trigger_id == "badnets":
+        atomic_write_json(output_root / f"controls_seed{pair_seed}.json", controls)
     return controls
 
 

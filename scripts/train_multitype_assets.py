@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 6.8 seconds
+Wall time: 3.1 seconds
 Output:
 from __future__ import annotations
 
@@ -49,7 +49,19 @@ def main():
             clean_path = render_asset_path(config["assets"]["models"]["clean"], seed=seed)
             backdoor_path = render_asset_path(config["assets"]["models"]["backdoor"], seed=seed, trigger=trigger_id)
             controls_path = Path("artifacts/multitype_models") / f"controls_{trigger_id}_seed{seed}.json"
-            if clean_path.exists() and backdoor_path.exists() and controls_path.exists():
+            controls_compatible = False
+            if controls_path.exists():
+                existing_controls = json.loads(controls_path.read_text(encoding="utf-8"))
+                if trigger_id == "inputaware":
+                    controls_compatible = (
+                        existing_controls.get("source") == "BackdoorBench/attack/inputaware.py"
+                        and (backdoor_path.parent / "trigger_state.pt").exists()
+                    )
+                elif trigger_id == "ssba":
+                    controls_compatible = existing_controls.get("source") == "BackdoorBench/attack/ssba.py"
+                else:
+                    controls_compatible = True
+            if clean_path.exists() and backdoor_path.exists() and controls_path.exists() and controls_compatible:
                 controls = json.loads(controls_path.read_text(encoding="utf-8"))
                 print(f"seed={seed} trigger={trigger_id} status=assets_resumed", flush=True)
             else:

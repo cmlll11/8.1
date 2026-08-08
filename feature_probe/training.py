@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 6.9 seconds
+Wall time: 3.1 seconds
 Output:
 from __future__ import annotations
 
@@ -209,6 +209,7 @@ def train_classifier_pair(
     controls = {
         "pair_seed": int(pair_seed),
         "smoke": bool(smoke),
+        "source": "BackdoorBench/attack/ssba.py" if trigger_id == "ssba" else "project_fixed_trigger_adapter",
         "metrics": results,
         "poisoned_examples": int(len(poison_indices)),
         "poison_indices": splits.train_indices[: len(train_images)][poison_indices].tolist(),

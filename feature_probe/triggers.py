@@ -1,11 +1,14 @@
+Exit code: 0
+Wall time: 7 seconds
+Output:
 from __future__ import annotations
 
-"""Deterministic CIFAR-10 trigger mappings used by the multitype experiment.
+"""Trigger adapters used by the multitype experiment.
 
-The implementations are deliberately stateless: the trigger recipe is part of
-the manifest and the mapping can therefore be replayed exactly when pair
-bundles are regenerated.  They are small adapters around the public attack
-families, not trigger-search procedures.
+Input-Aware and SSBA are delegated to the public BackdoorBench-derived
+implementations in :mod:`feature_probe.backdoorbench_attacks`.  The remaining
+fixed mappings are stateless inference-time adapters, and their provenance is
+recorded in the experiment manifest.
 """
 
 from dataclasses import dataclass
@@ -13,6 +16,12 @@ import math
 
 import torch
 import torch.nn.functional as F
+
+from .backdoorbench_attacks import (
+    OfficialInputAwareTrigger,
+    OfficialSSBAArrayTrigger,
+    build_inputaware_modules,
+)
 
 
 @dataclass(frozen=True)
@@ -83,32 +92,6 @@ class LowFrequencyTrigger(FamilyTrigger):
         return (images + delta).clamp(0, 1)
 
 
-class InputAwareTrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
-        amplitude = float(self.spec.params.get("amplitude", 0.06))
-        # The image mean controls phase/amplitude, making the mapping
-        # sample-specific while remaining deterministic and differentiable.
-        phase = images.mean(dim=(1, 2, 3), keepdim=True) * (2 * math.pi)
-        h, w = images.shape[-2:]
-        y, x = torch.meshgrid(
-            torch.linspace(0, 1, h, device=images.device, dtype=images.dtype),
-            torch.linspace(0, 1, w, device=images.device, dtype=images.dtype),
-            indexing="ij",
-        )
-        carrier = torch.sin(2 * math.pi * x + phase) * torch.cos(2 * math.pi * y + phase)
-        return (images + amplitude * carrier).clamp(0, 1)
-
-
-class SSBATrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
-        amplitude = float(self.spec.params.get("amplitude", 0.025))
-        # A content-dependent high-frequency residual is a lightweight,
-        # reproducible stand-in for the sample-specific steganographic family.
-        pooled = F.avg_pool2d(images, kernel_size=3, stride=1, padding=1)
-        residual = images - pooled
-        return (images + amplitude * torch.tanh(residual * 8.0)).clamp(0, 1)
-
-
 class BadNetsTrigger(FamilyTrigger):
     def apply(self, images: torch.Tensor) -> torch.Tensor:
         top = int(self.spec.params.get("top", 28))
@@ -131,13 +114,20 @@ TRIGGER_CLASSES = {
     "badnets": BadNetsTrigger,
     "blended": BlendedTrigger,
     "wanet": WaNetTrigger,
-    "inputaware": InputAwareTrigger,
+    "inputaware": OfficialInputAwareTrigger,
     "low_frequency": LowFrequencyTrigger,
-    "ssba": SSBATrigger,
+    "ssba": OfficialSSBAArrayTrigger,
 }
 
 
-def build_trigger(trigger_id: str, config: dict, *, target: int | None = None):
+def build_trigger(
+    trigger_id: str,
+    config: dict,
+    *,
+    target: int | None = None,
+    checkpoint_path: str | None = None,
+    device: str = "cpu",
+):
     trigger_id = str(trigger_id)
     if trigger_id not in TRIGGER_CLASSES:
         raise ValueError(f"Unknown trigger family: {trigger_id}")
@@ -147,4 +137,19 @@ def build_trigger(trigger_id: str, config: dict, *, target: int | None = None):
         legacy = config.get("backdoor", {})
         recipe = {"top": legacy.get("patch_top", 28), "left": legacy.get("patch_left", 28),
                   "size": legacy.get("patch_size", 4), "value": legacy.get("patch_value", [1.0, 1.0, 1.0]), **recipe}
+    if trigger_id == "inputaware":
+        if checkpoint_path is None:
+            raise ValueError("Input-Aware requires a trained BackdoorBench generator checkpoint")
+        modules = build_inputaware_modules(device)
+        artifact = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        modules.generator.load_state_dict(artifact["generator"])
+        modules.mask.load_state_dict(artifact["mask"])
+        return OfficialInputAwareTrigger(modules.generator, modules.mask, modules.threshold)
+    if trigger_id == "ssba":
+        train_path = recipe.get("train_path")
+        test_path = recipe.get("test_path")
+        if not train_path or not test_path:
+            raise ValueError("SSBA requires triggers.ssba.train_path and test_path from BackdoorBench")
+        return OfficialSSBAArrayTrigger(train_path, test_path)
     return TRIGGER_CLASSES[trigger_id](TriggerSpec(trigger_id, int(config.get("target_label", target or 0)), recipe))
+

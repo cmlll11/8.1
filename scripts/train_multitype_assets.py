@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 6.8 seconds
+Output:
 from __future__ import annotations
 
 import argparse
@@ -77,15 +80,26 @@ def main():
                           "artifact_sha256": sha256_file(uap_path)},
             )
             save_pair_bundle(uap_pair_path, uap_bundle)
-            trigger = build_trigger(trigger_id, config, target=config["target_label"])
+            trigger_checkpoint = None
+            if trigger_id == "inputaware":
+                trigger_checkpoint = str(backdoor_path.parent / "trigger_state.pt")
+            trigger = build_trigger(
+                trigger_id,
+                config,
+                target=config["target_label"],
+                checkpoint_path=trigger_checkpoint,
+                device=args.device,
+            )
             trigger_pair_path = render_asset_path(config["assets"]["pairs"]["trigger"], seed=seed, trigger=trigger_id)
             trigger_asr = mapping_asr(
                 backdoor_model, trigger, splits.test_images, splits.test_labels,
                 config["target_label"], batch_size=512, device=args.device,
+                indices=splits.test_indices, split="test",
             )
             clean_trigger_asr = mapping_asr(
                 clean_model, trigger, splits.test_images, splits.test_labels,
                 config["target_label"], batch_size=512, device=args.device,
+                indices=splits.test_indices, split="test",
             )
             trigger_bundle = build_pair_bundle(
                 splits, trigger, target=config["target_label"], count_per_split=pair_count,
@@ -116,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

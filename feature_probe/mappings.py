@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 6.7 seconds
+Output:
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +15,7 @@ class KnownInputMapping(Protocol):
     def apply(self, images: torch.Tensor) -> torch.Tensor: ...
 
 
-def apply_mapping(mapping, images: torch.Tensor) -> torch.Tensor:
+def apply_mapping(mapping, images: torch.Tensor, *, indices=None, split=None) -> torch.Tensor:
     """Apply a neural generator or an object implementing KnownInputMapping."""
     if callable(mapping):
         mapped = mapping(images)
@@ -20,7 +23,13 @@ def apply_mapping(mapping, images: torch.Tensor) -> torch.Tensor:
         apply = getattr(mapping, "apply", None)
         if not callable(apply):
             raise TypeError("mapping must be callable or provide an apply(images) method")
-        mapped = apply(images)
+        if indices is None and split is None:
+            mapped = apply(images)
+        else:
+            try:
+                mapped = apply(images, indices=indices, split=split)
+            except TypeError:
+                mapped = apply(images)
     if not isinstance(mapped, torch.Tensor):
         raise TypeError("mapping output must be a torch.Tensor")
     if mapped.shape != images.shape:
@@ -75,3 +84,4 @@ class UniversalAdditivePerturbation:
         if delta.ndim == 3:
             delta = delta.unsqueeze(0)
         return (images + delta.to(images.device, images.dtype)).clamp(0, 1)
+

@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 6.8 seconds
+Output:
 protocol: MDL-FEATURE-v1
 run_name: multitype_feature_complexity_formal
 target_label: 0
@@ -31,9 +34,23 @@ triggers:
   badnets: {size: 4, top: 28, left: 28, value: [1.0, 1.0, 1.0]}
   blended: {alpha: 0.20}
   wanet: {strength: 0.08}
-  inputaware: {amplitude: 0.06}
+  inputaware:
+    source: BackdoorBench/attack/inputaware.py
+    mask_epochs: 25
+    lr_G: 0.01
+    lr_M: 0.01
+    lambda_div: 1.0
+    lambda_norm: 100.0
+    mask_density: 0.032
+    schedulerG_milestones: [200, 300, 400, 500]
+    schedulerM_milestones: [10, 20]
+    schedulerG_lambda: 0.1
+    schedulerM_lambda: 0.1
   low_frequency: {amplitude: 0.08, frequency: 2}
-  ssba: {amplitude: 0.025}
+  ssba:
+    source: BackdoorBench/attack/ssba.py
+    train_path: artifacts/backdoorbench/ssba/cifar10_ssba_train_b1.npy
+    test_path: artifacts/backdoorbench/ssba/cifar10_ssba_test_b1.npy
 
 targeted_uap:
   epsilon_candidates: [0.06274509803921569, 0.09411764705882353, 0.12549019607843137]

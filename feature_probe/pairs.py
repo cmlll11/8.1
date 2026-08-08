@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 6.8 seconds
+Output:
 from __future__ import annotations
 
 from pathlib import Path
@@ -31,7 +34,14 @@ def build_pair_bundle(splits, mapping, *, target: int, count_per_split: int, see
         generated = []
         for start in range(0, len(clean), 256):
             batch = clean[start:start + 256].to(device)
-            generated.append(apply_mapping(mapping, batch).cpu())
+            generated.append(
+                apply_mapping(
+                    mapping,
+                    batch,
+                    indices=chosen_indices[start:start + len(batch)],
+                    split=name,
+                ).cpu()
+            )
         clean_parts.append(clean)
         mapped_parts.append(torch.cat(generated))
         label_parts.append(chosen_labels)
@@ -51,3 +61,4 @@ def save_pair_bundle(path: str | Path, payload: dict):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
+

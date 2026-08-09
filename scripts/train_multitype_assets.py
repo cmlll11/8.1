@@ -20,7 +20,7 @@ from feature_probe.uap import train_projected_targeted_uap
 from feature_probe.utils import atomic_write_json, sha256_file
 
 
-ATTACK_IMPLEMENTATION_VERSION = {"inputaware": 2, "ssba": 2}
+ATTACK_IMPLEMENTATION_VERSION = {"inputaware": 3, "ssba": 2}
 
 
 def classifier_asset_is_compatible(path: Path, *, seed: int, kind: str, trigger_id: str | None = None) -> bool:
@@ -210,3 +210,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -396,7 +396,11 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
     torch.manual_seed(int(pair_seed))
     model = CifarResNet18().to(device)
     modules = build_inputaware_modules(device)
-    opt_c = torch.optim.SGD(model.parameters(), lr=float(classifier_cfg["learning_rate"]), momentum=float(classifier_cfg["momentum"]), weight_decay=float(classifier_cfg["weight_decay"]))
+    inputaware_learning_rate = float(attack_cfg.get("classifier_learning_rate", classifier_cfg["learning_rate"]))
+    gradient_clip_norm = float(attack_cfg.get("gradient_clip_norm", 0.0))
+    if gradient_clip_norm < 0.0:
+        raise ValueError("triggers.inputaware.gradient_clip_norm must be non-negative")
+    opt_c = torch.optim.SGD(model.parameters(), lr=inputaware_learning_rate, momentum=float(classifier_cfg["momentum"]), weight_decay=float(classifier_cfg["weight_decay"]))
     opt_g = torch.optim.Adam(modules.generator.parameters(), lr=float(attack_cfg.get("lr_G", 1e-2)), betas=(0.5, 0.9))
     opt_m = torch.optim.Adam(modules.mask.parameters(), lr=float(attack_cfg.get("lr_M", 1e-2)), betas=(0.5, 0.9))
     scheduler_c = torch.optim.lr_scheduler.CosineAnnealingLR(opt_c, T_max=max(epochs, 1))
@@ -418,7 +422,7 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
             "best_state", "best_trigger", "best_asr", "best_clean_accuracy", "best_epoch", "epoch",
         }
         checkpoint_compatible = (
-            ckpt.get("checkpoint_version") == 3
+            ckpt.get("checkpoint_version") == 4
             and ckpt.get("pair_seed") == int(pair_seed)
             and required_checkpoint_keys.issubset(ckpt)
             and ckpt.get("best_state") is not None
@@ -471,7 +475,12 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
                 dist_x = torch.sqrt(F.mse_loss(x1, x2, reduction="none").mean((1, 2, 3)))
                 dist_m = torch.sqrt(F.mse_loss(masks1, masks2, reduction="none").mean((1, 2, 3)))
                 mask_loss = lambda_div * torch.mean(dist_x / (dist_m + eps)) + lambda_norm * F.relu(masks1 - mask_density).mean()
-                mask_loss.backward(); opt_m.step()
+                if not torch.isfinite(mask_loss):
+                    raise RuntimeError(f"Input-Aware mask pretraining produced non-finite loss at epoch {mask_epoch + 1}")
+                mask_loss.backward()
+                if gradient_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(modules.mask.parameters(), gradient_clip_norm)
+                opt_m.step()
                 mask_total += float(mask_loss.detach()) * len(x1); mask_seen += len(x1)
             scheduler_m.step()
             atomic_torch_save(mask_latest, {"checkpoint_version": 2, "pair_seed": pair_seed, "epoch": mask_epoch + 1, "mask": modules.mask.state_dict(), "optimizer_m": opt_m.state_dict(), "scheduler_m": scheduler_m.state_dict()})
@@ -505,7 +514,11 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
                 nonfinite_loss = True
                 print(f"pair={pair_seed} model=backdoor epoch={epoch + 1}/{epochs} status=nonfinite_loss_stop", flush=True)
                 break
-            loss.backward(); opt_c.step(); opt_g.step(); train_loss += float(loss.detach()) * len(total_inputs); seen += len(total_inputs)
+            loss.backward()
+            if gradient_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
+                torch.nn.utils.clip_grad_norm_(modules.generator.parameters(), gradient_clip_norm)
+            opt_c.step(); opt_g.step(); train_loss += float(loss.detach()) * len(total_inputs); seen += len(total_inputs)
         if nonfinite_loss:
             break
         scheduler_c.step(); scheduler_g.step()
@@ -522,16 +535,16 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
         if score is not None and (best_score is None or score > best_score):
             best_asr, best_clean_accuracy = score; best_epoch = epoch + 1
             best_state = copy.deepcopy(model.state_dict()); best_trigger = {"generator": copy.deepcopy(modules.generator.state_dict()), "mask": copy.deepcopy(modules.mask.state_dict())}
-        atomic_torch_save(latest, {"checkpoint_version": 3, "pair_seed": pair_seed, "epoch": epoch + 1, "model_state": model.state_dict(), "generator": modules.generator.state_dict(), "mask": modules.mask.state_dict(), "optimizer_c": opt_c.state_dict(), "optimizer_g": opt_g.state_dict(), "optimizer_m": opt_m.state_dict(), "scheduler_c": scheduler_c.state_dict(), "scheduler_g": scheduler_g.state_dict(), "scheduler_m": scheduler_m.state_dict(), "history": history, "best_state": best_state, "best_trigger": best_trigger, "best_asr": best_asr, "best_clean_accuracy": best_clean_accuracy, "best_epoch": best_epoch})
+        atomic_torch_save(latest, {"checkpoint_version": 4, "pair_seed": pair_seed, "epoch": epoch + 1, "model_state": model.state_dict(), "generator": modules.generator.state_dict(), "mask": modules.mask.state_dict(), "optimizer_c": opt_c.state_dict(), "optimizer_g": opt_g.state_dict(), "optimizer_m": opt_m.state_dict(), "scheduler_c": scheduler_c.state_dict(), "scheduler_g": scheduler_g.state_dict(), "scheduler_m": scheduler_m.state_dict(), "history": history, "best_state": best_state, "best_trigger": best_trigger, "best_asr": best_asr, "best_clean_accuracy": best_clean_accuracy, "best_epoch": best_epoch})
     if best_state is None or not isinstance(best_trigger, dict):
         raise RuntimeError("Input-Aware backdoor training produced no checkpoint meeting both validation gates")
     model.load_state_dict(best_state); modules.generator.load_state_dict(best_trigger["generator"]); modules.mask.load_state_dict(best_trigger["mask"]); trigger = OfficialInputAwareTrigger(modules.generator, modules.mask, threshold)
     destination = output_root / "inputaware" / f"seed{pair_seed}" / "attack_result.pt"; destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"metadata": {"protocol": config["protocol"], "architecture": "cifar_resnet18", "pair_seed": pair_seed, "model_kind": "backdoor", "trigger_id": "inputaware", "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 3}, "model": best_state, "epoch": best_epoch}, destination)
+    torch.save({"metadata": {"protocol": config["protocol"], "architecture": "cifar_resnet18", "pair_seed": pair_seed, "model_kind": "backdoor", "trigger_id": "inputaware", "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 4}, "model": best_state, "epoch": best_epoch}, destination)
     trigger_state = destination.parent / "trigger_state.pt"; atomic_torch_save(trigger_state, best_trigger)
     clean_metrics = classifier_metrics(clean_model, test_images, test_labels, trigger, target, batch_size=512, device=device, indices=splits.test_indices[:len(test_images)], split="test")
     backdoor_metrics = classifier_metrics(model, test_images, test_labels, trigger, target, batch_size=512, device=device, indices=splits.test_indices[:len(test_images)], split="test")
-    controls = {"pair_seed": int(pair_seed), "smoke": bool(smoke), "metrics": {"clean": clean_metrics, "backdoor": backdoor_metrics}, "poisoned_examples": int(len(poison_indices)), "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 3, "selected_epoch": best_epoch, "selected_validation_clean_accuracy": best_clean_accuracy, "selected_validation_asr": best_asr, "clean_accuracy_passed": clean_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]) and backdoor_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]), "backdoor_asr_passed": backdoor_metrics["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]), "clean_trigger_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10)), "clean_patch_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10))}
+    controls = {"pair_seed": int(pair_seed), "smoke": bool(smoke), "metrics": {"clean": clean_metrics, "backdoor": backdoor_metrics}, "poisoned_examples": int(len(poison_indices)), "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 4, "selected_epoch": best_epoch, "selected_validation_clean_accuracy": best_clean_accuracy, "selected_validation_asr": best_asr, "classifier_learning_rate": inputaware_learning_rate, "gradient_clip_norm": gradient_clip_norm, "amp": bool(attack_cfg.get("amp", False)), "clean_accuracy_passed": clean_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]) and backdoor_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]), "backdoor_asr_passed": backdoor_metrics["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]), "clean_trigger_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10)), "clean_patch_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10))}
     controls["all_passed"] = all(v for k, v in controls.items() if k.endswith("_passed")); atomic_write_json(output_root / f"controls_inputaware_seed{pair_seed}.json", controls)
     return controls
 

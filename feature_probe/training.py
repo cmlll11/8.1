@@ -355,12 +355,19 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
     history, best_state, best_trigger, best_asr, start = [], None, None, -1.0, 0
     if latest.exists():
         ckpt = torch.load(latest, map_location=device, weights_only=False)
-        if ckpt.get("pair_seed") == int(pair_seed):
+        required_checkpoint_keys = {
+            "model_state", "generator", "mask",
+            "optimizer_c", "optimizer_g", "optimizer_m",
+            "scheduler_c", "scheduler_g", "scheduler_m",
+        }
+        if ckpt.get("pair_seed") == int(pair_seed) and required_checkpoint_keys.issubset(ckpt):
             model.load_state_dict(ckpt["model_state"]); modules.generator.load_state_dict(ckpt["generator"]); modules.mask.load_state_dict(ckpt["mask"])
             opt_c.load_state_dict(ckpt["optimizer_c"]); opt_g.load_state_dict(ckpt["optimizer_g"]); opt_m.load_state_dict(ckpt["optimizer_m"])
             scheduler_c.load_state_dict(ckpt["scheduler_c"]); scheduler_g.load_state_dict(ckpt["scheduler_g"]); scheduler_m.load_state_dict(ckpt["scheduler_m"])
             history = ckpt.get("history", []); best_state = ckpt.get("best_state"); best_trigger = ckpt.get("best_trigger"); best_asr = float(ckpt.get("best_asr", best_asr)); start = int(ckpt.get("epoch", 0))
             print(f"pair={pair_seed} model=backdoor status=checkpoint_resumed epoch={start}/{epochs}", flush=True)
+        elif ckpt.get("pair_seed") == int(pair_seed):
+            print(f"pair={pair_seed} model=backdoor status=checkpoint_incompatible_restart", flush=True)
     for epoch in range(start, epochs):
         model.train(); modules.generator.train(); modules.mask.eval()
         order1 = torch.randperm(len(train_images), generator=torch.Generator().manual_seed(pair_seed * 20000 + epoch))

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.8 seconds
-Output:
 from __future__ import annotations
 
 from pathlib import Path
@@ -61,4 +58,3 @@ def save_pair_bundle(path: str | Path, payload: dict):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
-

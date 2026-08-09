@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.8 seconds
-Output:
 from __future__ import annotations
 
 """Adapters for the public BackdoorBench attack implementations.
@@ -177,4 +174,3 @@ class OfficialSSBAArrayTrigger:
         if int(indices.max()) >= len(source):
             raise IndexError(f"SSBA array has {len(source)} samples but index {int(indices.max())} was requested")
         return source[indices].to(images.device, images.dtype)
-

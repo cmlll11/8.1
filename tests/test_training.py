@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from feature_probe.mappings import ConstantPatch
-from feature_probe.training import mapping_asr, train_classifier_pair
+from feature_probe.training import inputaware_checkpoint_score, mapping_asr, train_classifier_pair
 
 
 class PatchTargetClassifier(nn.Module):
@@ -161,6 +161,15 @@ def test_inputaware_training_and_resume_pipeline(monkeypatch, tmp_path):
     first = train_classifier_pair(splits, config, pair_seed=0, device="cpu", output_root=tmp_path, smoke=True, trigger_id="inputaware")
     second = train_classifier_pair(splits, config, pair_seed=0, device="cpu", output_root=tmp_path, smoke=True, trigger_id="inputaware")
 
-    assert first["implementation_version"] == 2
+    assert first["implementation_version"] == 3
     assert second["all_passed"]
     assert (tmp_path / "inputaware/seed0/trigger_state.pt").is_file()
+
+
+def test_inputaware_checkpoint_requires_both_finite_validation_gates():
+    kwargs = {"minimum_clean_accuracy": 0.9, "minimum_backdoor_asr": 0.9}
+
+    assert inputaware_checkpoint_score(0.91, 0.99, **kwargs) == (0.99, 0.91)
+    assert inputaware_checkpoint_score(0.10, 1.0, **kwargs) is None
+    assert inputaware_checkpoint_score(float("nan"), 1.0, **kwargs) is None
+

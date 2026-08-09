@@ -233,12 +233,13 @@ def mapping_asr(model, mapping, images, labels, target, *, batch_size, device, i
     offset = 0
     for batch_images, batch_labels in batches(images, labels, batch_size=batch_size, seed=0, shuffle=False):
         batch_len = len(batch_images)
+        batch_indices = None if indices is None else indices[offset:offset + batch_len]
         keep = batch_labels != int(target)
         if not keep.any():
             offset += batch_len
             continue
         batch_images = batch_images[keep].to(device)
-        batch_indices = None if indices is None else batch_indices[keep]
+        batch_indices = None if batch_indices is None else batch_indices[keep]
         mapped = apply_mapping(
             mapping,
             batch_images,

@@ -25,7 +25,17 @@ def test_mapping_asr_supports_fixed_and_trainable_mappings():
     patch = ConstantPatch(top=3, left=3, size=1)
     generator = WhiteImageGenerator().train()
 
-    patch_asr = mapping_asr(model, patch, images, labels, 0, batch_size=2, device="cpu")
+    patch_asr = mapping_asr(
+        model,
+        patch,
+        images,
+        labels,
+        0,
+        batch_size=2,
+        device="cpu",
+        indices=torch.arange(len(images)),
+        split="test",
+    )
     generator_asr = mapping_asr(model, generator, images, labels, 0, batch_size=2, device="cpu")
 
     assert patch_asr == 1.0

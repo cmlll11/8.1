@@ -27,3 +27,20 @@ def test_self_contained_checkpoint_round_trip(tmp_path):
     images = torch.rand(1, 3, 32, 32)
     with torch.no_grad():
         assert torch.equal(model(images), restored(images))
+
+
+def test_legacy_checkpoint_without_architecture_is_inferred_by_state_dict(tmp_path):
+    model = CifarResNet18().eval()
+    path = tmp_path / "legacy_model.pt"
+    torch.save(
+        {
+            "metadata": {"protocol": "MDL-FEATURE-v1"},
+            "model": model.state_dict(),
+            "epoch": 1,
+        },
+        path,
+    )
+
+    restored = load_classifier(path)
+
+    assert isinstance(restored, CifarResNet18)

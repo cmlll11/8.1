@@ -20,13 +20,7 @@ def apply_mapping(mapping, images: torch.Tensor, *, indices=None, split=None) ->
         apply = getattr(mapping, "apply", None)
         if not callable(apply):
             raise TypeError("mapping must be callable or provide an apply(images) method")
-        if indices is None and split is None:
-            mapped = apply(images)
-        else:
-            try:
-                mapped = apply(images, indices=indices, split=split)
-            except TypeError:
-                mapped = apply(images)
+        mapped = apply(images, indices=indices, split=split)
     if not isinstance(mapped, torch.Tensor):
         raise TypeError("mapping output must be a torch.Tensor")
     if mapped.shape != images.shape:
@@ -52,7 +46,7 @@ class ConstantPatch:
     size: int = 3
     value: tuple[float, ...] = (1.0, 1.0, 1.0)
 
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         if images.ndim != 4:
             raise ValueError("Expected NCHW images")
         if len(self.value) != images.shape[1]:
@@ -76,7 +70,7 @@ class UniversalAdditivePerturbation:
         if self.delta.ndim not in (3, 4):
             raise ValueError("delta must have shape CHW or 1CHW")
 
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         delta = self.delta
         if delta.ndim == 3:
             delta = delta.unsqueeze(0)

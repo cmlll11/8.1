@@ -10,6 +10,7 @@ from feature_probe.forward import (
     compare_feature_changes,
     extract_feature_pairs_by_layer,
     fitted_feature_asr,
+    subset_pair_bundle_by_split,
 )
 
 
@@ -44,6 +45,15 @@ def test_pair_alignment_rejects_different_base_examples():
 
     with pytest.raises(ValueError, match="indices"):
         assert_pair_alignment(first, second)
+
+
+def test_subset_pair_bundle_keeps_aligned_prefix_per_split():
+    source = bundle()
+    selected = subset_pair_bundle_by_split(source, 3)
+
+    assert len(selected["clean"]) == 9
+    assert selected["split_codes"].tolist() == [0] * 3 + [1] * 3 + [2] * 3
+    assert selected["indices"].tolist() == [0, 1, 2, 8, 9, 10, 16, 17, 18]
 
 
 def test_extracts_all_layers_in_one_aligned_bundle():

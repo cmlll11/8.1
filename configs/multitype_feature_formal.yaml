@@ -80,6 +80,7 @@ assets:
 
 observation:
   batch_size: 128
+  examples_per_split: 256
   summary_examples: 256
   similarity_examples: 128
   bootstrap_samples: 200

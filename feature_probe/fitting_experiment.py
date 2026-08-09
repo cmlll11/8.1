@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,19 @@ class CandidateSpec:
             "kernel": self.kernel,
             "mask_penalty": self.mask_penalty,
         }
+
+
+def fitting_fingerprint(config: dict, *, protocol: str, seed: int, trigger_id: str,
+                        condition: str, layer: str, steps: int,
+                        model_sha256: str, pair_sha256: str) -> str:
+    payload = {
+        "protocol": protocol,
+        "seed": int(seed), "trigger_id": trigger_id, "condition": condition, "layer": layer,
+        "steps": int(steps), "fitting": config["fitting"],
+        "model_sha256": model_sha256, "pair_sha256": pair_sha256,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def candidate_specs(

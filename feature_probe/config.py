@@ -48,6 +48,8 @@ def validate_config(config: dict[str, Any]) -> None:
         observation = config["observation"]
         if "bootstrap_samples" in observation and int(observation["bootstrap_samples"]) < 1:
             raise ValueError("observation.bootstrap_samples must be positive")
+        if "examples_per_split" in observation and int(observation["examples_per_split"]) < 1:
+            raise ValueError("observation.examples_per_split must be positive")
     if "fitting" in config and "nrmse_threshold" in config["fitting"]:
         threshold = float(config["fitting"]["nrmse_threshold"])
         if not 0.0 < threshold:

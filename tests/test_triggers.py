@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from feature_probe.backdoorbench_attacks import OfficialInputAwareTrigger, OfficialSSBAArrayTrigger, build_inputaware_modules
@@ -49,3 +50,26 @@ def test_ssba_requires_official_arrays(tmp_path):
     images = torch.rand(2, 3, 32, 32)
     output = trigger.apply(images, indices=torch.tensor([0, 1]), split="train")
     assert output.shape == images.shape
+
+
+def test_ssba_accepts_official_nhwc_arrays(tmp_path):
+    train_path = tmp_path / "train_nhwc.npy"
+    test_path = tmp_path / "test_nhwc.npy"
+    array = np.zeros((4, 32, 32, 3), dtype=np.uint8)
+    array[1, :, :, 0] = 255
+    np.save(train_path, array)
+    np.save(test_path, array)
+
+    trigger = OfficialSSBAArrayTrigger(train_path, test_path)
+    output = trigger.apply(torch.zeros(1, 3, 32, 32), indices=torch.tensor([1]), split="test")
+
+    assert output.shape == (1, 3, 32, 32)
+    assert torch.all(output[:, 0] == 1)
+
+
+def test_inputaware_rejects_incomplete_checkpoint(tmp_path):
+    path = tmp_path / "trigger_state.pt"
+    torch.save({"generator": {}}, path)
+
+    with pytest.raises(ValueError, match="Invalid Input-Aware"):
+        build_trigger("inputaware", config(), checkpoint_path=str(path))

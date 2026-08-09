@@ -159,9 +159,15 @@ class OfficialSSBAArrayTrigger:
     @staticmethod
     def _load(path: Path) -> torch.Tensor:
         array = np.load(path)
+        if array.ndim != 4 or len(array) == 0:
+            raise ValueError(f"SSBA array must be a non-empty rank-4 array, got {tuple(array.shape)} from {path}")
+        if tuple(array.shape[1:]) == (32, 32, 3):
+            array = np.ascontiguousarray(array.transpose(0, 3, 1, 2))
+        elif tuple(array.shape[1:]) != (3, 32, 32):
+            raise ValueError(f"SSBA array must have shape [N,3,32,32] or [N,32,32,3], got {tuple(array.shape)} from {path}")
         tensor = torch.from_numpy(np.asarray(array)).float()
-        if tensor.ndim != 4 or tuple(tensor.shape[1:]) != (3, 32, 32):
-            raise ValueError(f"SSBA array must have shape [N,3,32,32], got {tuple(tensor.shape)} from {path}")
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"SSBA array contains non-finite values: {path}")
         if tensor.max() > 1.0:
             tensor = tensor / 255.0
         return tensor.clamp(0, 1).contiguous()
@@ -170,7 +176,11 @@ class OfficialSSBAArrayTrigger:
         if indices is None or split not in {"train", "validation", "test"}:
             raise ValueError("Official SSBA trigger requires sample indices and split name")
         source = self.test if split == "test" else self.train
-        indices = torch.as_tensor(indices, dtype=torch.long)
-        if int(indices.max()) >= len(source):
+        indices = torch.as_tensor(indices, dtype=torch.long).flatten()
+        if len(indices) != len(images):
+            raise ValueError(f"SSBA indices length {len(indices)} does not match batch size {len(images)}")
+        if indices.numel() == 0:
+            return images.clone()
+        if int(indices.min()) < 0 or int(indices.max()) >= len(source):
             raise IndexError(f"SSBA array has {len(source)} samples but index {int(indices.max())} was requested")
         return source[indices].to(images.device, images.dtype)

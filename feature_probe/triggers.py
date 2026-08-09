@@ -33,12 +33,12 @@ class FamilyTrigger:
         self.spec = spec
         self.mapping_id = spec.trigger_id
 
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         raise NotImplementedError
 
 
 class BlendedTrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         alpha = float(self.spec.params.get("alpha", 0.20))
         if not 0.0 < alpha <= 1.0:
             raise ValueError("blended alpha must be in (0, 1]")
@@ -55,7 +55,7 @@ class BlendedTrigger(FamilyTrigger):
 
 
 class WaNetTrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         strength = float(self.spec.params.get("strength", 0.08))
         n, c, h, w = images.shape
         y, x = torch.meshgrid(
@@ -72,7 +72,7 @@ class WaNetTrigger(FamilyTrigger):
 
 
 class LowFrequencyTrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         amplitude = float(self.spec.params.get("amplitude", 0.08))
         frequency = int(self.spec.params.get("frequency", 2))
         _, c, h, w = images.shape
@@ -90,7 +90,7 @@ class LowFrequencyTrigger(FamilyTrigger):
 
 
 class BadNetsTrigger(FamilyTrigger):
-    def apply(self, images: torch.Tensor) -> torch.Tensor:
+    def apply(self, images: torch.Tensor, **_) -> torch.Tensor:
         top = int(self.spec.params.get("top", 28))
         left = int(self.spec.params.get("left", 28))
         size = int(self.spec.params.get("size", 4))
@@ -139,6 +139,8 @@ def build_trigger(
             raise ValueError("Input-Aware requires a trained BackdoorBench generator checkpoint")
         modules = build_inputaware_modules(device)
         artifact = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if not isinstance(artifact, dict) or not {"generator", "mask"}.issubset(artifact):
+            raise ValueError(f"Invalid Input-Aware trigger checkpoint: {checkpoint_path}")
         modules.generator.load_state_dict(artifact["generator"])
         modules.mask.load_state_dict(artifact["mask"])
         return OfficialInputAwareTrigger(modules.generator, modules.mask, modules.threshold)

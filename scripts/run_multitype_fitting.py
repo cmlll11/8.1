@@ -23,7 +23,7 @@ from feature_probe.fitters import (
     evaluate_feature_mapping,
     fit_feature_mapping,
 )
-from feature_probe.fitting_experiment import candidate_specs, minimum_bits
+from feature_probe.fitting_experiment import candidate_specs, fitting_fingerprint, minimum_bits
 from feature_probe.forward import bundle_asr, extract_feature_pairs_by_layer, fitted_feature_asr
 from feature_probe.utils import atomic_torch_save, atomic_write_json, environment_record, sha256_file
 
@@ -35,6 +35,15 @@ CONDITIONS = {
     "trigger_clean": ("clean", "trigger"),
 }
 
+_FILE_HASH_CACHE: dict[str, str] = {}
+
+
+def cached_sha256(path: Path) -> str:
+    key = str(path.resolve())
+    if key not in _FILE_HASH_CACHE:
+        _FILE_HASH_CACHE[key] = sha256_file(path)
+    return _FILE_HASH_CACHE[key]
+
 
 def cpu_state_dict(model):
     return {name: value.detach().cpu() for name, value in model.state_dict().items()}
@@ -45,6 +54,12 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
     model_kind, mapping_kind = CONDITIONS[condition]
     model_path = render_asset_path(config["assets"]["models"]["clean" if model_kind == "clean" else "backdoor"], seed=seed, trigger=trigger_id)
     pair_path = render_asset_path(config["assets"]["pairs"]["uap" if mapping_kind == "uap" else "trigger"], seed=seed, trigger=trigger_id)
+    model_sha256 = cached_sha256(model_path)
+    pair_sha256 = cached_sha256(pair_path)
+    fingerprint = fitting_fingerprint(
+        config, protocol=PROTOCOL, seed=seed, trigger_id=trigger_id, condition=condition, layer=layer,
+        steps=steps, model_sha256=model_sha256, pair_sha256=pair_sha256,
+    )
     model = load_classifier(model_path, device=device)
     bundle = load_pair_bundle(pair_path)
     features = extract_feature_pairs_by_layer(model, bundle, [layer], device=device, batch_size=int(config["observation"]["batch_size"]))[layer].feature_tensors_to(device)
@@ -67,21 +82,52 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
     rows = []
     result_path = output_dir / "results.json"
     if result_path.exists():
-        previous = json.loads(result_path.read_text(encoding="utf-8"))
-        if previous.get("seed") == seed and previous.get("trigger_id") == trigger_id and previous.get("layer") == layer and previous.get("condition") == condition:
-            rows = previous.get("rows", [])
-    completed_variants = {(str(row["candidate_key"]), float(row["pruning"]), str(row["quantization"])) for row in rows}
+        try:
+            previous = json.loads(result_path.read_text(encoding="utf-8"))
+            if (
+                previous.get("seed") == seed and previous.get("trigger_id") == trigger_id
+                and previous.get("layer") == layer and previous.get("condition") == condition
+                and previous.get("fingerprint") == fingerprint
+                and isinstance(previous.get("rows"), list)
+            ):
+                rows = previous["rows"]
+        except (OSError, ValueError, TypeError):
+            rows = []
+    completed_variants = {
+        (str(row["candidate_key"]), float(row["pruning"]), str(row["quantization"]))
+        for row in rows
+        if isinstance(row, dict) and {"candidate_key", "pruning", "quantization"}.issubset(row)
+    }
     run_id = make_run_id(f"fit_{trigger_id}_{layer}_{condition}")
     for spec in specs:
         torch.manual_seed(30_000 + seed * 1_000 + spec.fit_seed)
         mapper = build_feature_mapping(spec.family, tuple(train.clean.shape[1:]), rank=spec.rank, kernel=spec.kernel, mask_penalty=spec.mask_penalty, spatial_support=support)
         checkpoint_path = checkpoint_dir / f"{spec.key}.pt"
+        checkpoint_loaded = False
         if checkpoint_path.exists():
-            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            mapper.load_state_dict(checkpoint["state_dict"])
-            mapper = mapper.to(device)
-            validation_dense = float(checkpoint["validation_nrmse"])
-        else:
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                checkpoint_compatible = (
+                    isinstance(checkpoint, dict)
+                    and checkpoint.get("protocol") == PROTOCOL
+                    and checkpoint.get("candidate_key") == spec.key
+                    and checkpoint.get("layer") == layer
+                    and checkpoint.get("fingerprint") == fingerprint
+                    and checkpoint.get("structure") == spec.structure()
+                    and isinstance(checkpoint.get("state_dict"), dict)
+                    and math.isfinite(float(checkpoint.get("validation_nrmse", float("nan"))))
+                )
+                if checkpoint_compatible:
+                    mapper.load_state_dict(checkpoint["state_dict"])
+                    mapper = mapper.to(device)
+                    validation_dense = float(checkpoint["validation_nrmse"])
+                    checkpoint_loaded = True
+                    print(f"condition={condition} layer={layer} candidate={spec.key} status=checkpoint_resumed", flush=True)
+                else:
+                    print(f"condition={condition} layer={layer} candidate={spec.key} status=checkpoint_incompatible_restart", flush=True)
+            except (RuntimeError, TypeError, ValueError, KeyError, OSError) as exc:
+                print(f"condition={condition} layer={layer} candidate={spec.key} status=checkpoint_incompatible_restart reason={type(exc).__name__}", flush=True)
+        if not checkpoint_loaded:
             train_loader = DeviceTensorBatches(train.clean, train.mapped, batch_size=batch_size, shuffle=True, seed=40_000 + seed)
             fit = fit_feature_mapping(
                 mapper, train_loader, validation_loader, steps=int(steps),
@@ -91,7 +137,7 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
             )
             mapper = fit.model
             validation_dense = float(fit.best_validation_nrmse)
-            atomic_torch_save(checkpoint_path, {"protocol": PROTOCOL, "candidate_key": spec.key, "layer": layer, "state_dict": cpu_state_dict(mapper), "validation_nrmse": validation_dense})
+            atomic_torch_save(checkpoint_path, {"protocol": PROTOCOL, "candidate_key": spec.key, "layer": layer, "fingerprint": fingerprint, "structure": spec.structure(), "state_dict": cpu_state_dict(mapper), "validation_nrmse": validation_dense})
         for pruning in fitting["pruning"]:
             for quantization in fitting["quantization"]:
                 variant_key = (spec.key, float(pruning), str(quantization))
@@ -100,7 +146,7 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
                 compressed = compress_feature_mapping(mapper, pruning=float(pruning), quantization=str(quantization))
                 validation_nrmse = evaluate_feature_mapping(compressed.model, validation_loader, device=device)
                 test_nrmse = evaluate_feature_mapping(compressed.model, test_loader, device=device)
-                fitted_asr = fitted_feature_asr(model, compressed.model, features, test_contexts, layer, config["target_label"], device=device, batch_size=batch_size)
+                fitted_asr = fitted_feature_asr(model, compressed.model, test, test_contexts, layer, config["target_label"], device=device, batch_size=batch_size)
                 if not all(math.isfinite(float(v)) for v in (validation_nrmse, test_nrmse, fitted_asr)):
                     raise RuntimeError(f"Non-finite metric for {condition}/{layer}/{spec.key}")
                 bits = count_feature_mapping_bits(compressed.model, layer_id=layer, family=spec.family, rank=spec.rank, kernel=spec.kernel, quantization=str(quantization), pruning=float(pruning)).as_dict()
@@ -122,6 +168,7 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
                     "status": "running", "protocol": PROTOCOL, "run_id": run_id,
                     "command": " ".join(sys.argv), "started_at": utc_now(),
                     "seed": seed, "trigger_id": trigger_id, "condition": condition, "layer": layer,
+                    "fingerprint": fingerprint,
                     "source_asr": source_asr, "nrmse_threshold": float(fitting["nrmse_threshold"]), "rows": rows,
                 })
         del mapper
@@ -130,11 +177,12 @@ def fit_condition_layer(config, *, seed, trigger_id, condition, layer, device, o
     payload = {
         "status": "completed", "protocol": PROTOCOL, "run_id": run_id, "seed": seed, "trigger_id": trigger_id,
         "condition": condition, "layer": layer, "source_asr": source_asr,
+        "fingerprint": fingerprint,
         "nrmse_threshold": float(fitting["nrmse_threshold"]), "rows": rows,
         "minimum_fit": minimum_bits(rows, nrmse_threshold=float(fitting["nrmse_threshold"])),
         "minimum_activation": minimum_bits(rows, nrmse_threshold=float(fitting["nrmse_threshold"]), require_activation=True),
-        "model": {"path": str(model_path), "sha256": sha256_file(model_path)},
-        "pair": {"path": str(pair_path), "sha256": sha256_file(pair_path)},
+        "model": {"path": str(model_path), "sha256": model_sha256},
+        "pair": {"path": str(pair_path), "sha256": pair_sha256},
     }
     payload["started_at"] = payload.get("started_at", utc_now())
     payload["finished_at"] = utc_now()

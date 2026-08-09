@@ -24,6 +24,16 @@ def _load_resume_checkpoint(path: Path, device: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def inputaware_checkpoint_score(validation_clean_accuracy: float, validation_asr: float,
+                                *, minimum_clean_accuracy: float, minimum_backdoor_asr: float):
+    values = torch.tensor([validation_clean_accuracy, validation_asr], dtype=torch.float64)
+    if not torch.isfinite(values).all():
+        return None
+    if validation_clean_accuracy < minimum_clean_accuracy or validation_asr < minimum_backdoor_asr:
+        return None
+    return float(validation_asr), float(validation_clean_accuracy)
+
+
 def batches(images, labels, *, batch_size: int, seed: int, shuffle: bool):
     order = torch.arange(len(images))
     if shuffle:
@@ -397,7 +407,7 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
     if mask_epochs < 1:
         raise ValueError("triggers.inputaware.mask_epochs must be positive")
     latest = checkpoint_root / f"inputaware_seed{pair_seed}_backdoor_latest.pt"
-    history, best_state, best_trigger, best_asr, start = [], None, None, -1.0, 0
+    history, best_state, best_trigger, best_asr, best_clean_accuracy, best_epoch, start = [], None, None, -1.0, -1.0, None, 0
     attack_checkpoint_loaded = False
     if latest.exists():
         ckpt = _load_resume_checkpoint(latest, device)
@@ -405,10 +415,10 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
             "model_state", "generator", "mask",
             "optimizer_c", "optimizer_g", "optimizer_m",
             "scheduler_c", "scheduler_g", "scheduler_m",
-            "best_state", "best_trigger", "best_asr", "epoch",
+            "best_state", "best_trigger", "best_asr", "best_clean_accuracy", "best_epoch", "epoch",
         }
         checkpoint_compatible = (
-            ckpt.get("checkpoint_version") == 2
+            ckpt.get("checkpoint_version") == 3
             and ckpt.get("pair_seed") == int(pair_seed)
             and required_checkpoint_keys.issubset(ckpt)
             and ckpt.get("best_state") is not None
@@ -420,7 +430,7 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
             model.load_state_dict(ckpt["model_state"]); modules.generator.load_state_dict(ckpt["generator"]); modules.mask.load_state_dict(ckpt["mask"])
             opt_c.load_state_dict(ckpt["optimizer_c"]); opt_g.load_state_dict(ckpt["optimizer_g"]); opt_m.load_state_dict(ckpt["optimizer_m"])
             scheduler_c.load_state_dict(ckpt["scheduler_c"]); scheduler_g.load_state_dict(ckpt["scheduler_g"]); scheduler_m.load_state_dict(ckpt["scheduler_m"])
-            history = ckpt.get("history", []); best_state = ckpt.get("best_state"); best_trigger = ckpt.get("best_trigger"); best_asr = float(ckpt.get("best_asr", best_asr)); start = int(ckpt.get("epoch", 0))
+            history = ckpt.get("history", []); best_state = ckpt.get("best_state"); best_trigger = ckpt.get("best_trigger"); best_asr = float(ckpt.get("best_asr", best_asr)); best_clean_accuracy = float(ckpt.get("best_clean_accuracy", best_clean_accuracy)); best_epoch = int(ckpt["best_epoch"]); start = int(ckpt.get("epoch", 0))
             attack_checkpoint_loaded = True
             print(f"pair={pair_seed} model=backdoor status=checkpoint_resumed epoch={start}/{epochs}", flush=True)
         elif ckpt.get("pair_seed") == int(pair_seed):
@@ -469,11 +479,13 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
 
     modules.mask.eval()
     modules.mask.requires_grad_(False)
+    minimum_clean_accuracy = float(config["qualification"]["minimum_clean_accuracy"])
+    minimum_backdoor_asr = float(config["qualification"]["minimum_backdoor_asr"])
     for epoch in range(start, epochs):
         model.train(); modules.generator.train(); modules.mask.eval()
         order1 = torch.randperm(len(train_images), generator=torch.Generator().manual_seed(pair_seed * 20000 + epoch))
         order2 = torch.randperm(len(train_images), generator=torch.Generator().manual_seed(pair_seed * 30000 + epoch))
-        train_loss = 0.0; seen = 0; bs = int(classifier_cfg["batch_size"])
+        train_loss = 0.0; seen = 0; bs = int(classifier_cfg["batch_size"]); nonfinite_loss = False
         for begin in range(0, len(order1), bs):
             s1, s2 = order1[begin:begin + bs], order2[begin:begin + bs]
             x1 = augment_batch(train_images[s1], seed=pair_seed * 1_000_000 + epoch * 10_000 + begin // bs).to(device)
@@ -488,24 +500,38 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
             logits = model(total_inputs); loss_ce = nn.functional.cross_entropy(logits, total_targets)
             dist_x = torch.sqrt(F.mse_loss(x1[:nbd], x2[nbd:nbd + num_cross], reduction="none").mean((1, 2, 3)))
             dist_p = torch.sqrt(F.mse_loss(patterns1, patterns2, reduction="none").mean((1, 2, 3)))
-            loss = loss_ce + lambda_div * torch.mean(dist_x / (dist_p + eps)); loss.backward(); opt_c.step(); opt_g.step(); train_loss += float(loss.detach()) * len(total_inputs); seen += len(total_inputs)
+            loss = loss_ce + lambda_div * torch.mean(dist_x / (dist_p + eps))
+            if not torch.isfinite(loss):
+                nonfinite_loss = True
+                print(f"pair={pair_seed} model=backdoor epoch={epoch + 1}/{epochs} status=nonfinite_loss_stop", flush=True)
+                break
+            loss.backward(); opt_c.step(); opt_g.step(); train_loss += float(loss.detach()) * len(total_inputs); seen += len(total_inputs)
+        if nonfinite_loss:
+            break
         scheduler_c.step(); scheduler_g.step()
         trigger = OfficialInputAwareTrigger(modules.generator, modules.mask, threshold)
         val_acc, val_asr = _inputaware_validation(model, trigger, validation_images, validation_labels, target, device)
         history.append({"epoch": epoch + 1, "train_loss": train_loss / max(seen, 1), "validation_clean_accuracy": val_acc, "validation_asr": val_asr})
         print(f"pair={pair_seed} model=backdoor epoch={epoch + 1}/{epochs} validation_asr={val_asr:.5f}", flush=True)
-        if val_asr > best_asr:
-            best_asr = val_asr; best_state = copy.deepcopy(model.state_dict()); best_trigger = {"generator": copy.deepcopy(modules.generator.state_dict()), "mask": copy.deepcopy(modules.mask.state_dict())}
-        atomic_torch_save(latest, {"checkpoint_version": 2, "pair_seed": pair_seed, "epoch": epoch + 1, "model_state": model.state_dict(), "generator": modules.generator.state_dict(), "mask": modules.mask.state_dict(), "optimizer_c": opt_c.state_dict(), "optimizer_g": opt_g.state_dict(), "optimizer_m": opt_m.state_dict(), "scheduler_c": scheduler_c.state_dict(), "scheduler_g": scheduler_g.state_dict(), "scheduler_m": scheduler_m.state_dict(), "history": history, "best_state": best_state, "best_trigger": best_trigger, "best_asr": best_asr})
+        score = inputaware_checkpoint_score(
+            val_acc, val_asr,
+            minimum_clean_accuracy=minimum_clean_accuracy,
+            minimum_backdoor_asr=minimum_backdoor_asr,
+        )
+        best_score = None if best_epoch is None else (best_asr, best_clean_accuracy)
+        if score is not None and (best_score is None or score > best_score):
+            best_asr, best_clean_accuracy = score; best_epoch = epoch + 1
+            best_state = copy.deepcopy(model.state_dict()); best_trigger = {"generator": copy.deepcopy(modules.generator.state_dict()), "mask": copy.deepcopy(modules.mask.state_dict())}
+        atomic_torch_save(latest, {"checkpoint_version": 3, "pair_seed": pair_seed, "epoch": epoch + 1, "model_state": model.state_dict(), "generator": modules.generator.state_dict(), "mask": modules.mask.state_dict(), "optimizer_c": opt_c.state_dict(), "optimizer_g": opt_g.state_dict(), "optimizer_m": opt_m.state_dict(), "scheduler_c": scheduler_c.state_dict(), "scheduler_g": scheduler_g.state_dict(), "scheduler_m": scheduler_m.state_dict(), "history": history, "best_state": best_state, "best_trigger": best_trigger, "best_asr": best_asr, "best_clean_accuracy": best_clean_accuracy, "best_epoch": best_epoch})
     if best_state is None or not isinstance(best_trigger, dict):
-        raise RuntimeError("Input-Aware backdoor training produced no finite checkpoint")
+        raise RuntimeError("Input-Aware backdoor training produced no checkpoint meeting both validation gates")
     model.load_state_dict(best_state); modules.generator.load_state_dict(best_trigger["generator"]); modules.mask.load_state_dict(best_trigger["mask"]); trigger = OfficialInputAwareTrigger(modules.generator, modules.mask, threshold)
     destination = output_root / "inputaware" / f"seed{pair_seed}" / "attack_result.pt"; destination.parent.mkdir(parents=True, exist_ok=True)
-    best_history_epoch = max(history, key=lambda item: item["validation_asr"])["epoch"]
-    torch.save({"metadata": {"protocol": config["protocol"], "architecture": "cifar_resnet18", "pair_seed": pair_seed, "model_kind": "backdoor", "trigger_id": "inputaware", "source": "BackdoorBench/attack/inputaware.py"}, "model": best_state, "epoch": best_history_epoch}, destination)
+    torch.save({"metadata": {"protocol": config["protocol"], "architecture": "cifar_resnet18", "pair_seed": pair_seed, "model_kind": "backdoor", "trigger_id": "inputaware", "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 3}, "model": best_state, "epoch": best_epoch}, destination)
     trigger_state = destination.parent / "trigger_state.pt"; atomic_torch_save(trigger_state, best_trigger)
     clean_metrics = classifier_metrics(clean_model, test_images, test_labels, trigger, target, batch_size=512, device=device, indices=splits.test_indices[:len(test_images)], split="test")
     backdoor_metrics = classifier_metrics(model, test_images, test_labels, trigger, target, batch_size=512, device=device, indices=splits.test_indices[:len(test_images)], split="test")
-    controls = {"pair_seed": int(pair_seed), "smoke": bool(smoke), "metrics": {"clean": clean_metrics, "backdoor": backdoor_metrics}, "poisoned_examples": int(len(poison_indices)), "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 2, "clean_accuracy_passed": clean_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]) and backdoor_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]), "backdoor_asr_passed": backdoor_metrics["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]), "clean_trigger_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10)), "clean_patch_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10))}
+    controls = {"pair_seed": int(pair_seed), "smoke": bool(smoke), "metrics": {"clean": clean_metrics, "backdoor": backdoor_metrics}, "poisoned_examples": int(len(poison_indices)), "source": "BackdoorBench/attack/inputaware.py", "implementation_version": 3, "selected_epoch": best_epoch, "selected_validation_clean_accuracy": best_clean_accuracy, "selected_validation_asr": best_asr, "clean_accuracy_passed": clean_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]) and backdoor_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]), "backdoor_asr_passed": backdoor_metrics["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]), "clean_trigger_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10)), "clean_patch_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10))}
     controls["all_passed"] = all(v for k, v in controls.items() if k.endswith("_passed")); atomic_write_json(output_root / f"controls_inputaware_seed{pair_seed}.json", controls)
     return controls
+

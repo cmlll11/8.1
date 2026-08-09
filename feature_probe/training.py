@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.9 seconds
-Output:
 from __future__ import annotations
 
 import copy
@@ -405,4 +402,3 @@ def _train_inputaware_classifier_pair(splits, config, *, pair_seed, device, outp
     controls = {"pair_seed": int(pair_seed), "smoke": bool(smoke), "metrics": {"clean": clean_metrics, "backdoor": backdoor_metrics}, "poisoned_examples": int(len(poison_indices)), "source": "BackdoorBench/attack/inputaware.py", "clean_accuracy_passed": clean_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]) and backdoor_metrics["clean_accuracy"] >= float(config["qualification"]["minimum_clean_accuracy"]), "backdoor_asr_passed": backdoor_metrics["patch_asr"] >= float(config["qualification"]["minimum_backdoor_asr"]), "clean_trigger_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10)), "clean_patch_asr_passed": clean_metrics["patch_asr"] <= float(config["qualification"].get("maximum_clean_patch_asr", 0.10))}
     controls["all_passed"] = all(v for k, v in controls.items() if k.endswith("_passed")); atomic_write_json(output_root / f"controls_inputaware_seed{pair_seed}.json", controls)
     return controls
-

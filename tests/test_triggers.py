@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.8 seconds
-Output:
 import numpy as np
 import torch
 
@@ -52,4 +49,3 @@ def test_ssba_requires_official_arrays(tmp_path):
     images = torch.rand(2, 3, 32, 32)
     output = trigger.apply(images, indices=torch.tensor([0, 1]), split="train")
     assert output.shape == images.shape
-

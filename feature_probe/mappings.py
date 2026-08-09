@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.7 seconds
-Output:
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -84,4 +81,3 @@ class UniversalAdditivePerturbation:
         if delta.ndim == 3:
             delta = delta.unsqueeze(0)
         return (images + delta.to(images.device, images.dtype)).clamp(0, 1)
-

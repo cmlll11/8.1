@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.7 seconds
-Output:
 from __future__ import annotations
 
 """Trigger adapters used by the multitype experiment.
@@ -152,4 +149,3 @@ def build_trigger(
             raise ValueError("SSBA requires triggers.ssba.train_path and test_path from BackdoorBench")
         return OfficialSSBAArrayTrigger(train_path, test_path)
     return TRIGGER_CLASSES[trigger_id](TriggerSpec(trigger_id, int(config.get("target_label", target or 0)), recipe))
-

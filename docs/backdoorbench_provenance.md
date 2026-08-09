@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 6.9 seconds
-Output:
 # BackdoorBench attack provenance
 
 The multitype training code does not use the previous hand-written
@@ -40,4 +37,3 @@ artifacts/backdoorbench/ssba/cifar10_ssba_test_b1.npy
 No synthetic SSBA fallback is permitted. A missing official array makes the
 SSBA type `unqualified`/`missing_official_asset`, rather than producing a
 scientifically uninterpretable replacement trigger.
-

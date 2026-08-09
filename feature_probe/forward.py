@@ -18,6 +18,24 @@ def assert_pair_alignment(first: dict, second: dict) -> None:
             raise ValueError(f"Pair bundles are not aligned at {key!r}")
 
 
+def subset_pair_bundle_by_split(bundle: dict, max_examples_per_split: int) -> dict:
+    """Take the same deterministic prefix from every split of a pair bundle."""
+    limit = int(max_examples_per_split)
+    if limit < 1:
+        raise ValueError("max_examples_per_split must be positive")
+    positions = []
+    for split_code in SPLIT_CODE.values():
+        selected = torch.nonzero(bundle["split_codes"] == split_code, as_tuple=False).flatten()
+        if selected.numel() == 0:
+            raise ValueError(f"Pair bundle contains no split code {split_code}")
+        positions.append(selected[:limit])
+    positions = torch.cat(positions)
+    return {
+        key: value[positions].clone() if isinstance(value, torch.Tensor) else value
+        for key, value in bundle.items()
+    }
+
+
 def split_mask(bundle: dict, split: str) -> torch.Tensor:
     if split not in SPLIT_CODE:
         raise ValueError(f"Unknown split: {split}")

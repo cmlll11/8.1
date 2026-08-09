@@ -53,10 +53,18 @@ def load_classifier(path: str | Path, device: str = "cpu"):
             if isinstance(artifact.get(key), torch.nn.Module):
                 return artifact[key].to(device).eval()
         metadata = artifact.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
         if isinstance(artifact.get("model"), dict) and metadata.get("protocol") == PROTOCOL:
-            if metadata.get("architecture") != "cifar_resnet18":
-                raise RuntimeError(f"Unsupported classifier architecture in {path}: {metadata.get('architecture')!r}")
+            architecture = metadata.get("architecture")
+            # Early project checkpoints omitted this field, but their exact
+            # state-dict compatibility still identifies CifarResNet18 safely.
+            if architecture not in (None, "cifar_resnet18"):
+                raise RuntimeError(f"Unsupported classifier architecture in {path}: {architecture!r}")
             model = CifarResNet18(classes=10)
-            model.load_state_dict(artifact["model"])
+            try:
+                model.load_state_dict(artifact["model"])
+            except RuntimeError as exc:
+                raise RuntimeError(f"Classifier state dict is incompatible with CifarResNet18: {path}") from exc
             return model.to(device).eval()
     raise RuntimeError(f"Unsupported classifier artifact: {path}")

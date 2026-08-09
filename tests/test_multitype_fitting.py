@@ -1,6 +1,6 @@
 import torch
 
-from feature_probe.fitting_experiment import candidate_specs, minimum_bits
+from feature_probe.fitting_experiment import candidate_specs, fitting_fingerprint, minimum_bits
 
 
 def test_multitype_candidate_families_are_registered():
@@ -21,3 +21,10 @@ def test_minimum_bits_uses_validation_threshold_and_activation_gate():
     assert minimum_bits(rows, nrmse_threshold=0.1)["candidate_key"] == "small"
     assert minimum_bits(rows, nrmse_threshold=0.1, require_activation=True)["candidate_key"] == "valid"
 
+
+def test_fitting_fingerprint_changes_with_source_asset():
+    config = {"fitting": {"steps": 2, "nrmse_threshold": 0.1}}
+    first = fitting_fingerprint(config, protocol="MDL-FEATURE-v1", seed=0, trigger_id="badnets", condition="trigger_backdoor", layer="stem", steps=2, model_sha256="a", pair_sha256="b")
+    second = fitting_fingerprint(config, protocol="MDL-FEATURE-v1", seed=0, trigger_id="badnets", condition="trigger_backdoor", layer="stem", steps=2, model_sha256="changed", pair_sha256="b")
+
+    assert first != second

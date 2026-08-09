@@ -41,6 +41,27 @@ def main():
     consecutive_required = int(config["observation"].get("indistinguishable_consecutive_layers", 2))
     by_trigger = {}
     for trigger in trigger_ids:
+        qualification_by_seed = {}
+        for seed in seeds:
+            controls_path = Path("artifacts/multitype_models") / f"controls_{trigger}_seed{seed}.json"
+            obs_path = Path(args.observation_root) / f"seed{seed}" / "observation.json"
+            reasons = []
+            controls = json.loads(controls_path.read_text(encoding="utf-8")) if controls_path.exists() else None
+            observation = json.loads(obs_path.read_text(encoding="utf-8")) if obs_path.exists() else None
+            if not controls or not controls.get("all_passed", False):
+                reasons.append("model_controls_failed_or_missing")
+            if not observation or trigger not in observation.get("source_asr", {}):
+                reasons.append("observation_missing")
+            else:
+                trigger_sources = observation["source_asr"][trigger]
+                if float(observation["source_asr"].get("uap_clean", 0.0)) < float(config["qualification"]["minimum_adversarial_asr"]):
+                    reasons.append("uap_asr_below_threshold")
+                if float(trigger_sources.get("trigger_backdoor", 0.0)) < float(config["qualification"]["minimum_backdoor_asr"]):
+                    reasons.append("backdoor_asr_below_threshold")
+                if float(trigger_sources.get("trigger_clean", 1.0)) > float(config["qualification"].get("maximum_clean_patch_asr", 0.10)):
+                    reasons.append("clean_trigger_asr_above_threshold")
+            qualification_by_seed[str(seed)] = {"qualified": not reasons, "reasons": reasons}
+        trigger_qualified = all(item["qualified"] for item in qualification_by_seed.values())
         layer_records = {}
         statuses = []
         for layer_index, layer in enumerate(layers):
@@ -51,6 +72,8 @@ def main():
             auc_upper = []
             cross = []
             for seed in seeds:
+                if not qualification_by_seed[str(seed)]["qualified"]:
+                    continue
                 obs_path = Path(args.observation_root) / f"seed{seed}" / "observation.json"
                 fit_base = Path(args.fitting_root) / f"seed{seed}" / trigger / layer
                 if not obs_path.exists():
@@ -82,7 +105,13 @@ def main():
             valid_auc_upper = [float(v) for v in auc_upper if v is not None]
             ratio_indistinguishable = ci["lower"] is not None and ci["lower"] <= 1.0 <= ci["upper"]
             auc_indistinguishable = bool(valid_auc_upper) and max(valid_auc_upper) < auc_limit
-            status = "indistinguishable" if ratio_indistinguishable and auc_indistinguishable else "distinguishable"
+            complete = len(ratios) == len(seeds) and len(valid_auc_upper) == len(seeds)
+            if not trigger_qualified:
+                status = "unqualified"
+            elif not complete:
+                status = "insufficient"
+            else:
+                status = "indistinguishable" if ratio_indistinguishable and auc_indistinguishable else "distinguishable"
             statuses.append(status)
             layer_records[layer] = {
                 "ratio_per_seed": ratios,
@@ -103,11 +132,13 @@ def main():
                 confirmation = layers[index + consecutive_required - 1]
                 break
         by_trigger[trigger] = {
+            "qualification_by_seed": qualification_by_seed,
+            "qualified": trigger_qualified,
             "layers": layer_records,
             "status_by_layer": dict(zip(layers, statuses)),
             "first_indistinguishable_layer": first,
             "confirmation_layer": confirmation,
-            "last_distinguishable_layer": layers[max(0, layers.index(first) - 1)] if first in layers and layers.index(first) > 0 else None,
+            "last_distinguishable_layer": next((layer for layer in reversed(layers) if layer_records[layer]["status"] == "distinguishable"), None),
             "stopping_rule": f"{consecutive_required} consecutive layers with ratio CI containing 1 and AUROC CI upper < {auc_limit}",
         }
     report = {
@@ -124,7 +155,8 @@ def main():
     atomic_write_json(output_root / "multitype_feature_complexity.json", report)
     lines = ["# Multitype feature complexity", "", f"- NRMSE threshold: `{threshold}`", "", "| Trigger | First indistinguishable layer | Confirmation layer |", "|---|---|---|"]
     for trigger, result in by_trigger.items():
-        lines.append(f"| {trigger} | {result['first_indistinguishable_layer'] or 'not reached'} | {result['confirmation_layer'] or 'NA'} |")
+        first_layer = result["first_indistinguishable_layer"] if result["qualified"] else "unqualified"
+        lines.append(f"| {trigger} | {first_layer or 'not reached'} | {result['confirmation_layer'] or 'NA'} |")
     lines.extend(["", "## Per-layer status", ""])
     for trigger, result in by_trigger.items():
         lines.append(f"### {trigger}")
@@ -142,4 +174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
